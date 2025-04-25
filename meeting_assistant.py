@@ -1147,6 +1147,7 @@ def main():
         pv_container = st.container()
 
         # Traitement de la vidéo
+        # Traitement de la vidéo
         if video_file or video_url:
             with video_container:
                 st.subheader("🎥 Traitement de la vidéo")
@@ -1154,25 +1155,42 @@ def main():
                 with st.spinner("Transcription en cours..."):
                     if video_file:
                         st.session_state.video_transcript = transcribe_video(video_file)
+
                     elif video_url:
-                        # Télécharger la vidéo temporairement depuis l'URL
-                        import requests
                         try:
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
-                                response = requests.get(video_url, stream=True)
-                                if response.status_code == 200:
-                                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                                        temp_video.write(chunk)
-                                    temp_video_path = temp_video.name
-                                    st.session_state.video_transcript = transcribe_video(open(temp_video_path, "rb"))
+                            # Si c’est un lien direct Google Drive (drive.googleusercontent.com)
+                            if "drive.googleusercontent.com" in video_url:
+                                st.info("📥 Téléchargement de la vidéo depuis Google Drive...")
+                                import requests
+                                from urllib.parse import urlparse, parse_qs
+
+                                # Extraire l’ID de fichier
+                                parsed_url = urlparse(video_url)
+                                file_id = parse_qs(parsed_url.query).get("id", [None])[0]
+
+                                if not file_id:
+                                    st.error("❌ Lien Google Drive invalide (ID non trouvé).")
                                 else:
-                                    st.error("❌ Impossible de télécharger la vidéo depuis le lien fourni.")
+                                    download_url = f"https://drive.googleusercontent.com/uc?export=download&id={file_id}"
+                                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
+                                        response = requests.get(download_url, stream=True)
+                                        if response.status_code == 200:
+                                            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                                                temp_video.write(chunk)
+                                            temp_video_path = temp_video.name
+                                            with open(temp_video_path, "rb") as f:
+                                                st.session_state.video_transcript = transcribe_video(f)
+                                        else:
+                                            st.error("❌ Erreur lors du téléchargement de la vidéo Google Drive.")
+                            else:
+                                st.warning("⚠️ Seuls les liens directs Google Drive sont supportés pour l'instant.")
                         except Exception as e:
-                            st.error(f"❌ Erreur lors du téléchargement de la vidéo : {str(e)}")
+                            st.error(f"❌ Erreur lors du traitement du lien vidéo : {str(e)}")
 
                     if st.session_state.video_transcript:
                         st.success("✅ Transcription terminée!")
                         st.text_area("Transcription:", st.session_state.video_transcript, height=200)
+
 
                     
 
