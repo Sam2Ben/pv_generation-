@@ -1101,23 +1101,23 @@ def main():
     col1, col2, col3 = st.columns(3)
     
     with col1:
-    st.write("**🎥 Vidéo de la réunion**")
-    video_upload_mode = st.radio(
-        "Mode d'importation de la vidéo :", 
-        ("Uploader un fichier", "Fournir un lien"),
-        horizontal=True
-    )
-
-    video_file = None
-    video_url = None
-
-    if video_upload_mode == "Uploader un fichier":
-        video_file = st.file_uploader(
-            "Importez votre vidéo (MP4, VRO)",
-            type=["mp4", "vro"]
+        st.write("**🎥 Vidéo de la réunion**")
+        video_upload_mode = st.radio(
+            "Mode d'importation de la vidéo :", 
+            ("Uploader un fichier", "Fournir un lien"),
+            horizontal=True
         )
-    else:
-        video_url = st.text_input("Collez ici le lien de la vidéo (lien direct ou Drive partagé)")
+
+        video_file = None
+        video_url = None
+
+        if video_upload_mode == "Uploader un fichier":
+            video_file = st.file_uploader(
+                "Importez votre vidéo (MP4, VRO)",
+                type=["mp4", "vro"]
+            )
+        else:
+            video_url = st.text_input("Collez ici le lien de la vidéo (lien direct ou Drive partagé)")
 
     
     with col2:
