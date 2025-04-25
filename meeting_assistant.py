@@ -1147,7 +1147,6 @@ def main():
         pv_container = st.container()
 
         # Traitement de la vidéo
-        # Traitement de la vidéo
         if video_file or video_url:
             with video_container:
                 st.subheader("🎥 Traitement de la vidéo")
