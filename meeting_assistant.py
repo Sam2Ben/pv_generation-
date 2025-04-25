@@ -1101,10 +1101,24 @@ def main():
     col1, col2, col3 = st.columns(3)
     
     with col1:
+    st.write("**🎥 Vidéo de la réunion**")
+    video_upload_mode = st.radio(
+        "Mode d'importation de la vidéo :", 
+        ("Uploader un fichier", "Fournir un lien"),
+        horizontal=True
+    )
+
+    video_file = None
+    video_url = None
+
+    if video_upload_mode == "Uploader un fichier":
         video_file = st.file_uploader(
             "Importez votre vidéo (MP4, VRO)",
             type=["mp4", "vro"]
         )
+    else:
+        video_url = st.text_input("Collez ici le lien de la vidéo (lien direct ou Drive partagé)")
+
     
     with col2:
         image_files = st.file_uploader(
@@ -1133,14 +1147,34 @@ def main():
         pv_container = st.container()
 
         # Traitement de la vidéo
-        if video_file:
+        if video_file or video_url:
             with video_container:
                 st.subheader("🎥 Traitement de la vidéo")
+
                 with st.spinner("Transcription en cours..."):
-                    st.session_state.video_transcript = transcribe_video(video_file)
+                    if video_file:
+                        st.session_state.video_transcript = transcribe_video(video_file)
+                    elif video_url:
+                        # Télécharger la vidéo temporairement depuis l'URL
+                        import requests
+                        try:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
+                                response = requests.get(video_url, stream=True)
+                                if response.status_code == 200:
+                                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                                        temp_video.write(chunk)
+                                    temp_video_path = temp_video.name
+                                    st.session_state.video_transcript = transcribe_video(open(temp_video_path, "rb"))
+                                else:
+                                    st.error("❌ Impossible de télécharger la vidéo depuis le lien fourni.")
+                        except Exception as e:
+                            st.error(f"❌ Erreur lors du téléchargement de la vidéo : {str(e)}")
+
                     if st.session_state.video_transcript:
                         st.success("✅ Transcription terminée!")
                         st.text_area("Transcription:", st.session_state.video_transcript, height=200)
+
+                    
 
         # Traitement des images
         if image_files:
