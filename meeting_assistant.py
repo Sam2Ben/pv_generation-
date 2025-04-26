@@ -274,32 +274,27 @@ def process_segment_batch(segments, start_idx, batch_size, total_segments, temp_
     for i in range(start_idx, min(start_idx + batch_size, total_segments)):
         segment = segments[i]
         segment_number = i + 1
-        
         try:
             segment_path = os.path.join(temp_dir, f"segment_{segment_number}.mp3")
+            # Mise à jour du message unique de progression
             status_text.text(f"🎯 Traitement du segment {segment_number}/{total_segments}")
-            
             segment.export(segment_path, format="mp3")
-            
             with open(segment_path, "rb") as f:
                 audio_bytes = f.read()
-
             model = genai.GenerativeModel('gemini-2.0-flash')
             response = model.generate_content([
                 "Transcrivez ce segment audio mot pour mot en français.",
                 {"mime_type": "audio/mp3", "data": audio_bytes}
             ])
-            
             if response.text:
                 batch_transcript.append(response.text)
                 progress_bar.progress((i + 1)/total_segments)
-                
         except Exception as e:
             st.warning(f"⚠️ Erreur sur le segment {segment_number}: {str(e)}")
             batch_transcript.append(f"[Segment {segment_number} non transcrit]")
-            
         time.sleep(random.uniform(1, 2))
-    
+    # Message final de fin de lot
+    status_text.text("Traitement du lot terminé.")
     return batch_transcript
 
 def transcribe_video(video_file):
@@ -1194,7 +1189,9 @@ Instructions Détaillées :
 def download_video_from_drive(video_url, output_path):
     """Télécharge une vidéo depuis Google Drive avec gestion des gros fichiers"""
     try:
-        st.info("🔄 Initialisation du téléchargement...")
+        status_box = st.empty()
+        progress_bar = st.empty()
+        status_box.info("🔄 Initialisation du téléchargement...")
         
         # Extraire l'ID du fichier
         file_id = extract_file_id_from_url(video_url)
@@ -1202,7 +1199,7 @@ def download_video_from_drive(video_url, output_path):
             st.error("❌ Format d'URL Google Drive non reconnu")
             return False
 
-        st.info(f"📝 ID du fichier extrait : {file_id}")
+        status_box.info(f"📝 ID du fichier extrait : {file_id}")
 
         # Configuration de la session avec des headers complets
         session = requests.Session()
@@ -1217,27 +1214,18 @@ def download_video_from_drive(video_url, output_path):
 
         # Utiliser l'URL de téléchargement direct avec usercontent
         download_url = f'https://drive.usercontent.google.com/download?id={file_id}&export=download&authuser=0&confirm=t'
-        st.info(f"🔍 Tentative de téléchargement direct : {download_url}")
+        status_box.info(f"🔍 Téléchargement en cours...")
         
         response = session.get(download_url, headers=headers, stream=True, timeout=30)
-        st.info(f"📡 Code de statut : {response.status_code}")
-        st.info(f"📝 Type de contenu : {response.headers.get('Content-Type', 'Non spécifié')}")
-
-        # Vérifier si nous avons reçu un fichier et non une page HTML
         content_type = response.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type:
-            st.warning("⚠️ Redirection vers la page de confirmation détectée")
+            status_box.warning("⚠️ Redirection vers la page de confirmation détectée. Tentative alternative...")
             # Essayer l'URL alternative pour les gros fichiers
             download_url = f'https://drive.usercontent.google.com/download?id={file_id}&export=download&authuser=0&confirm=t&uuid=123&at=123'
-            st.info(f"🔍 Tentative avec URL pour gros fichiers : {download_url}")
             response = session.get(download_url, headers=headers, stream=True, timeout=30)
-            
             content_type = response.headers.get('Content-Type', '').lower()
             if 'text/html' in content_type:
-                st.error("❌ Impossible d'accéder au fichier. Assurez-vous que :")
-                st.error("1. Le fichier est partagé avec 'Tout le monde avec le lien'")
-                st.error("2. Vous avez les droits 'Lecteur' sur le fichier")
-                st.error("3. Le fichier n'est pas dans la corbeille")
+                st.error("❌ Impossible d'accéder au fichier. Assurez-vous que :\n1. Le fichier est partagé avec 'Tout le monde avec le lien'\n2. Vous avez les droits 'Lecteur' sur le fichier\n3. Le fichier n'est pas dans la corbeille")
                 return False
 
         # Utiliser un nom de fichier temporaire unique
@@ -1246,32 +1234,27 @@ def download_video_from_drive(video_url, output_path):
         temp_path = os.path.join(temp_dir, f"download_{file_id}_{int(time.time())}.tmp")
         
         try:
-            # Télécharger avec barre de progression
-            progress_bar = st.progress(0)
             chunk_size = 500 * 1024 * 1024  # 500MB chunks
             downloaded_size = 0
-            
-            # Obtenir la taille réelle du fichier depuis les headers
             expected_size = None
             if 'content-length' in response.headers:
                 expected_size = int(response.headers['content-length'])
-                st.info(f"📦 Taille totale du fichier : {expected_size/1024/1024:.1f} MB")
-            
+                status_box.info(f"📦 Taille totale du fichier : {expected_size/1024/1024:.1f} MB")
+            else:
+                status_box.info("📦 Taille totale du fichier inconnue")
+
             with open(temp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=chunk_size):
                     if chunk:
                         f.write(chunk)
                         downloaded_size += len(chunk)
                         # Afficher la progression
-                        current_mb = downloaded_size/1024/1024
                         if expected_size:
-                            current_percent = (downloaded_size/expected_size) * 100
-                            st.info(f"📥 Téléchargé : {current_mb:.1f} MB ({current_percent:.1f}%)")
-                            # Mise à jour de la barre de progression
-                            progress_bar.progress(min(1.0, downloaded_size/expected_size))
+                            current_percent = (downloaded_size/expected_size)
+                            status_box.info(f"📥 Téléchargé : {downloaded_size/1024/1024:.1f} MB / {expected_size/1024/1024:.1f} MB ({current_percent*100:.1f}%)")
+                            progress_bar.progress(min(1.0, current_percent))
                         else:
-                            # Si on n'a pas la taille totale, afficher juste la taille téléchargée
-                            st.info(f"📥 Téléchargé : {current_mb:.1f} MB")
+                            status_box.info(f"📥 Téléchargé : {downloaded_size/1024/1024:.1f} MB")
 
             # Vérifier le fichier téléchargé
             if os.path.exists(temp_path):
@@ -1283,7 +1266,6 @@ def download_video_from_drive(video_url, output_path):
                     except:
                         pass
                     return False
-                
                 # Vérifier les premiers octets pour s'assurer que c'est un fichier VRO
                 with open(temp_path, 'rb') as f:
                     header = f.read(8)
@@ -1294,7 +1276,6 @@ def download_video_from_drive(video_url, output_path):
                         except:
                             pass
                         return False
-                
                 # Renommer le fichier temporaire
                 try:
                     if os.path.exists(output_path):
@@ -1310,36 +1291,11 @@ def download_video_from_drive(video_url, output_path):
                     except Exception as e2:
                         st.error(f"❌ Échec de la copie du fichier : {str(e2)}")
                         return False
-                
                 st.success(f"✅ Téléchargement réussi - Taille : {file_size/1024/1024:.1f} MB")
-                
-                # Convertir si c'est un VRO
-                if output_path.lower().endswith('.vro'):
-                    st.info("🔄 Conversion du fichier VRO en MP4...")
-                    mp4_path = output_path + '.mp4'
-                    if convert_vro_to_mp4(output_path, mp4_path):
-                        try:
-                            os.remove(output_path)
-                            os.rename(mp4_path, output_path)
-                            st.success("✅ Conversion VRO → MP4 réussie")
-                            return True
-                        except Exception as e:
-                            st.error(f"❌ Erreur lors du renommage après conversion : {str(e)}")
-                            return False
-                    else:
-                        st.error("❌ Échec de la conversion VRO")
-                        if os.path.exists(mp4_path):
-                            try:
-                                os.remove(mp4_path)
-                            except:
-                                pass
-                        return False
-                
                 return True
             else:
                 st.error("❌ Échec de l'écriture du fichier")
                 return False
-
         except Exception as e:
             st.error(f"❌ Erreur pendant le téléchargement : {str(e)}")
             try:
@@ -1348,7 +1304,6 @@ def download_video_from_drive(video_url, output_path):
             except:
                 pass
             return False
-
     except Exception as e:
         st.error(f"❌ Erreur inattendue : {str(e)}")
         try:
@@ -1674,7 +1629,7 @@ def main():
                         
                         col1, col2 = st.columns([1, 1])
                         with col1:
-                            st.image(image, caption=f"Image {idx + 1}: {image_file.name}", use_container_width=True)
+                            st.image(image, caption=f"Image {idx + 1}: {image_file.name}", use_column_width=True)
                         with col2:
                             transcription = process_handwritten_image(image_bytes)
                             if transcription:
