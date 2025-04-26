@@ -363,7 +363,7 @@ def transcribe_video(video_file):
             for batch_start in range(0, len(segments), BATCH_SIZE):
                 batch_results = process_segment_batch(
                     segments, batch_start, BATCH_SIZE, len(segments),
-                    temp_dir, progress_bar, status_text
+                    progress_bar, status_text
                 )
                 full_transcript.extend(batch_results)
 
