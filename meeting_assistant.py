@@ -1369,12 +1369,14 @@ def main():
     configure_apis()
     
     # Ajout du titre avec logo
-    st.markdown("""
-        <div style='display: flex; align-items: center; justify-content: center; margin-bottom: 2rem;'>
-            <img src='logo.png' style='height: 80px; margin-right: 20px;'>
-            <h1 style='margin: 0;'>Génération de PV</h1>
-        </div>
-    """, unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([2, 2, 8])
+    with col2:
+        st.image("logo.png", width=200)
+    with col3:
+        st.markdown(
+            "<h1 style='text-align: left; margin-top: 25px;'>Génération du PV de Réunion</h1>",
+            unsafe_allow_html=True
+    )
     
     # Variables de session pour stocker les résultats
     if 'video_transcript' not in st.session_state:
