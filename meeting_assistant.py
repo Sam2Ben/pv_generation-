@@ -271,87 +271,74 @@ def process_segment_batch(segments, start_idx, batch_size, total_segments, temp_
     return batch_transcript
 
 def transcribe_video(video_file):
-    """Transcrit une vidéo en texte"""
+    """Transcrit une vidéo en texte sans charger tout en RAM."""
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
-            # Déterminer l'extension du fichier
+            # Créer un chemin temporaire avec bonne extension
             if hasattr(video_file, 'name'):
                 ext = os.path.splitext(video_file.name)[1].lower()
-                st.info(f"📝 Traitement du fichier vidéo: {video_file.name}")
+                video_temp_path = os.path.join(temp_dir, f"uploaded_video{ext}")
+                st.info(f"📝 Sauvegarde du fichier temporaire: {video_file.name}")
             else:
-                ext = '.mp4'  # Extension par défaut
-                st.info("📝 Traitement d'un fichier vidéo sans nom")
-            
-            # Utiliser un nom de fichier court avec la bonne extension
-            video_path = os.path.join(temp_dir, f"input{ext}")
-            audio_path = os.path.join(temp_dir, "output.mp3")
-            
-            st.info("💾 Écriture du fichier vidéo...")
-            # Écrire le fichier vidéo
-            with open(video_path, "wb") as f:
-                if hasattr(video_file, 'read'):
-                    while True:
-                        chunk = video_file.read(65536)  # 64 KB par lecture
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                else:
-                    f.write(video_file.getvalue())
+                ext = '.mp4'
+                video_temp_path = os.path.join(temp_dir, "uploaded_video.mp4")
+                st.info("📝 Sauvegarde d'un fichier vidéo sans nom")
 
-            
-            # Si c'est un fichier VRO, le convertir d'abord
-            if video_path.lower().endswith('.vro'):
-                mp4_path = video_path + '.mp4'
-                if not convert_vro_to_mp4(video_path, mp4_path):
-                    return ""
-                video_path = mp4_path
-            
-            # Vérifier la taille du fichier
-            video_size = os.path.getsize(video_path)
-            if video_size == 0:
-                st.error("❌ Le fichier vidéo est vide")
-                return ""
-            st.info(f"📊 Taille du fichier vidéo: {video_size} bytes")
+            # Maintenant, on enregistre directement l'objet téléchargé
+            with open(video_temp_path, 'wb') as out_file:
+                for chunk in iter(lambda: video_file.read(1024 * 1024), b''):
+                    out_file.write(chunk)
 
-            # Vérifier le format du fichier
-            if not verify_video_file(video_path):
+            st.success("✅ Vidéo sauvegardée sur disque temporaire")
+
+            # On vérifie la taille
+            video_size = os.path.getsize(video_temp_path)
+            st.info(f"📊 Taille du fichier vidéo: {video_size/1024/1024:.2f} MB")
+
+            # Vérifier la validité
+            if not verify_video_file(video_temp_path):
                 return ""
 
+            # On extrait maintenant l'audio
+            audio_path = os.path.join(temp_dir, "output_audio.mp3")
             st.info("🎵 Extraction de l'audio...")
-            if not extract_audio_from_video(video_path, audio_path):
+            if not extract_audio_from_video(video_temp_path, audio_path):
                 return ""
-            
+
+            # Segmentation
             st.info("🔄 Segmentation de l'audio...")
             segments = segment_audio(audio_path)
             if not segments:
                 st.error("❌ Échec de la segmentation audio")
                 return ""
-            
+
             st.success(f"✅ Audio segmenté en {len(segments)} parties")
             
+            # Traitement par batch
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
+
             full_transcript = []
             BATCH_SIZE = 10
-            
+
             for batch_start in range(0, len(segments), BATCH_SIZE):
                 batch_results = process_segment_batch(
                     segments, batch_start, BATCH_SIZE, len(segments),
                     temp_dir, progress_bar, status_text
                 )
                 full_transcript.extend(batch_results)
-            
+
             if not full_transcript:
                 st.warning("⚠️ Aucun texte n'a été transcrit")
                 return ""
                 
             st.success("✅ Transcription terminée avec succès")
             return "\n".join(full_transcript)
-            
+
         except Exception as e:
             st.error(f"❌ Erreur lors de la transcription: {str(e)}")
             return ""
+
 
 def process_handwritten_image(image_bytes):
     """Extrait le texte d'une image manuscrite avec mécanisme de retry"""
