@@ -1368,6 +1368,14 @@ def main():
     # Configuration de l'API Gemini
     configure_apis()
     
+    # Ajout du titre avec logo
+    st.markdown("""
+        <div style='display: flex; align-items: center; justify-content: center; margin-bottom: 2rem;'>
+            <img src='logo.png' style='height: 80px; margin-right: 20px;'>
+            <h1 style='margin: 0;'>Génération de PV</h1>
+        </div>
+    """, unsafe_allow_html=True)
+    
     # Variables de session pour stocker les résultats
     if 'video_transcript' not in st.session_state:
         st.session_state.video_transcript = ""
