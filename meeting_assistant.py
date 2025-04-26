@@ -1590,7 +1590,8 @@ def main():
         # Traitement de la vidéo
         with video_container:
             st.subheader("🎥 Traitement de la vidéo")
-            if video_file or (video_url and video_url.strip()):  # Vérifier si on a soit un fichier soit une URL valide
+            if (video_file is not None) or (video_url is not None and video_url.strip() != ""):
+          # Vérifier si on a soit un fichier soit une URL valide
                 with st.spinner("Transcription en cours..."):
                     if video_file:
                         st.session_state.video_transcript = transcribe_video(video_file)
