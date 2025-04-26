@@ -497,7 +497,8 @@ def process_pdf(pdf_file):
            
         2. EXTRACTION DES ACRONYMES :
            - Identifier TOUS les acronymes présents dans le document.
-           - Fournir leur définition complète telle qu'elle apparaît dans le texte (ou si elle est évidente).
+           - Si l'acronyme est défini explicitement dans le texte, utiliser cette définition EXACTE.
+           - Si l'acronyme n'est PAS défini dans le texte, rechercher sa définition officielle connue dans des sources fiables.
            - Lister les acronymes et leurs définitions SÉPARÉMENT à la fin.
         
         3. FORMAT DE SORTIE ATTENDU :
