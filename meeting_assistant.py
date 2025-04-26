@@ -13,8 +13,12 @@ from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import re
-import hashlib
-import math
+import requests
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+import json
+from bs4 import BeautifulSoup
 
 # Configuration des APIs
 def configure_apis():
@@ -40,25 +44,182 @@ def convert_to_mp3(input_path, output_path):
         st.error(f"Erreur de conversion audio : {e}")
         return False
 
-def extract_audio_from_video(input_video_path, output_audio_path):
-    """Extrait l'audio d'un fichier vidéo"""
+def extract_file_id_from_url(url):
+    """Extrait l'ID du fichier depuis une URL Google Drive"""
+    patterns = [
+        r"https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)",
+        r"https://drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)",
+        r"https://drive\.google\.com/uc\?id=([a-zA-Z0-9_-]+)",
+        r"id=([a-zA-Z0-9_-]+)"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def verify_video_file(file_path):
+    """Vérifie si le fichier vidéo est valide"""
     try:
-        command = [
-            "ffmpeg",
-            "-i", input_video_path,
-            "-vn",
-            "-acodec", "libmp3lame",
-            "-ar", "44100",
-            "-ac", "2",
-            "-ab", "192k",
-            "-f", "mp3",
-            output_audio_path
+        if not os.path.exists(file_path):
+            st.error(f"❌ Le fichier {file_path} n'existe pas")
+            return False
+            
+        file_size = os.path.getsize(file_path)
+        if file_size < 10000:  # Moins de 10KB est suspect
+            st.error("❌ Le fichier est trop petit pour être une vidéo valide")
+            return False
+            
+        st.info(f"📊 Taille du fichier : {file_size/1024/1024:.1f} MB")
+        
+        # Vérification du format avec ffprobe
+        probe_command = [
+            "ffprobe",
+            "-v", "error",
+            "-show_format",
+            "-show_streams",
+            file_path
         ]
-        subprocess.run(command, check=True)
+        
+        result = subprocess.run(probe_command, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            st.error(f"❌ Format vidéo non valide: {result.stderr}")
+            return False
+            
+        st.success("✅ Format vidéo validé")
         return True
+            
     except Exception as e:
-        st.error(f"Erreur lors de l'extraction audio : {e}")
+        st.error(f"❌ Erreur lors de la vérification: {str(e)}")
         return False
+
+def convert_vro_to_mp4(input_path, output_path):
+    """Convertit un fichier VRO en MP4"""
+    try:
+        st.info("🔄 Conversion du fichier VRO en MP4...")
+        
+        # Commande de conversion optimisée pour les fichiers VRO
+        convert_command = [
+            "ffmpeg",
+            "-y",  # Écraser le fichier de sortie si existant
+            "-fflags", "+genpts",  # Générer les timestamps
+            "-i", input_path,
+            "-c:v", "libx264",  # Codec vidéo
+            "-preset", "ultrafast",  # Conversion rapide
+            "-crf", "23",  # Qualité raisonnable
+            "-c:a", "aac",  # Codec audio
+            "-strict", "experimental",
+            "-b:a", "192k",  # Bitrate audio
+            "-movflags", "+faststart",  # Optimisation pour la lecture web
+            output_path
+        ]
+        
+        # Exécuter la conversion
+        result = subprocess.run(convert_command, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            st.error(f"❌ Erreur lors de la conversion VRO: {result.stderr}")
+            return False
+            
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            st.success("✅ Conversion VRO → MP4 réussie")
+            return True
+        else:
+            st.error("❌ Fichier MP4 non créé ou vide")
+            return False
+            
+    except Exception as e:
+        st.error(f"❌ Erreur lors de la conversion: {str(e)}")
+        return False
+
+def extract_audio_from_video(input_video_path, output_audio_path):
+    """Extrait l'audio d'une vidéo"""
+    try:
+        # Vérifier si le fichier existe
+        if not os.path.exists(input_video_path):
+            st.error("❌ Le fichier vidéo n'existe pas")
+            return False
+            
+        # Vérifier si le fichier est vide
+        if os.path.getsize(input_video_path) == 0:
+            st.error("❌ Le fichier vidéo est vide")
+            return False
+            
+        # Si c'est un fichier VRO, on le convertit d'abord en MP4
+        if input_video_path.lower().endswith('.vro'):
+            st.info("🔄 Conversion du fichier VRO en MP4...")
+            temp_mp4 = input_video_path + '.mp4'
+            try:
+                # Commande de conversion VRO vers MP4
+                convert_command = [
+                    'ffmpeg',
+                    '-i', input_video_path,
+                    '-c:v', 'libx264',
+                    '-preset', 'ultrafast',
+                    '-c:a', 'aac',
+                    '-strict', 'experimental',
+                    '-write_xing', '0',
+                    '-y',
+                    temp_mp4
+                ]
+                
+                result = subprocess.run(convert_command, capture_output=True, text=True)
+                if result.returncode != 0:
+                    st.error(f"❌ Erreur lors de la conversion VRO vers MP4: {result.stderr}")
+                    return False
+                    
+                input_video_path = temp_mp4
+                st.success("✅ Conversion VRO vers MP4 réussie")
+                
+            except Exception as e:
+                st.error(f"❌ Erreur lors de la conversion VRO vers MP4: {str(e)}")
+                return False
+                
+        # Extraction de l'audio
+        st.info("🎵 Extraction de l'audio...")
+        try:
+            # Commande d'extraction audio
+            extract_command = [
+                'ffmpeg',
+                '-i', input_video_path,
+                '-vn',
+                '-acodec', 'libmp3lame',
+                '-ar', '44100',
+                '-ab', '192k',
+                '-y',
+                output_audio_path
+            ]
+            
+            result = subprocess.run(extract_command, capture_output=True, text=True)
+            if result.returncode != 0:
+                st.error(f"❌ Erreur lors de l'extraction audio: {result.stderr}")
+                return False
+                
+            # Vérifier si le fichier audio a été créé et n'est pas vide
+            if not os.path.exists(output_audio_path) or os.path.getsize(output_audio_path) == 0:
+                st.error("❌ Le fichier audio n'a pas été créé ou est vide")
+                return False
+                
+            st.success("✅ Extraction audio réussie")
+            return True
+            
+        except Exception as e:
+            st.error(f"❌ Erreur lors de l'extraction audio: {str(e)}")
+            return False
+            
+    except Exception as e:
+        st.error(f"❌ Erreur inattendue lors du traitement: {str(e)}")
+        return False
+    finally:
+        # Nettoyage des fichiers temporaires
+        try:
+            temp_mp4 = input_video_path + '.mp4'
+            if os.path.exists(temp_mp4):
+                os.remove(temp_mp4)
+        except Exception as e:
+            st.warning(f"⚠️ Erreur lors du nettoyage des fichiers temporaires: {str(e)}")
 
 def segment_audio(audio_path, segment_length_ms=120000):
     """Divise un fichier audio en segments de 2 minutes"""
@@ -112,33 +273,80 @@ def process_segment_batch(segments, start_idx, batch_size, total_segments, temp_
 def transcribe_video(video_file):
     """Transcrit une vidéo en texte"""
     with tempfile.TemporaryDirectory() as temp_dir:
-        video_path = os.path.join(temp_dir, "input_video.mp4")
-        audio_path = os.path.join(temp_dir, "audio.mp3")
-        
-        with open(video_path, "wb") as f:
-            f.write(video_file.read())
-        
-        if not extract_audio_from_video(video_path, audio_path):
-            return ""
-        
-        segments = segment_audio(audio_path)
-        if not segments:
-            return ""
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        full_transcript = []
-        BATCH_SIZE = 10
-        
-        for batch_start in range(0, len(segments), BATCH_SIZE):
-            batch_results = process_segment_batch(
-                segments, batch_start, BATCH_SIZE, len(segments),
-                temp_dir, progress_bar, status_text
-            )
-            full_transcript.extend(batch_results)
+        try:
+            # Déterminer l'extension du fichier
+            if hasattr(video_file, 'name'):
+                ext = os.path.splitext(video_file.name)[1].lower()
+                st.info(f"📝 Traitement du fichier vidéo: {video_file.name}")
+            else:
+                ext = '.mp4'  # Extension par défaut
+                st.info("📝 Traitement d'un fichier vidéo sans nom")
             
-        return "\n".join(full_transcript)
+            # Utiliser un nom de fichier court avec la bonne extension
+            video_path = os.path.join(temp_dir, f"input{ext}")
+            audio_path = os.path.join(temp_dir, "output.mp3")
+            
+            st.info("💾 Écriture du fichier vidéo...")
+            # Écrire le fichier vidéo
+            with open(video_path, "wb") as f:
+                if hasattr(video_file, 'read'):
+                    f.write(video_file.read())
+                else:
+                    f.write(video_file.getvalue())
+            
+            # Si c'est un fichier VRO, le convertir d'abord
+            if video_path.lower().endswith('.vro'):
+                mp4_path = video_path + '.mp4'
+                if not convert_vro_to_mp4(video_path, mp4_path):
+                    return ""
+                video_path = mp4_path
+            
+            # Vérifier la taille du fichier
+            video_size = os.path.getsize(video_path)
+            if video_size == 0:
+                st.error("❌ Le fichier vidéo est vide")
+                return ""
+            st.info(f"📊 Taille du fichier vidéo: {video_size} bytes")
+
+            # Vérifier le format du fichier
+            if not verify_video_file(video_path):
+                return ""
+
+            st.info("🎵 Extraction de l'audio...")
+            if not extract_audio_from_video(video_path, audio_path):
+                return ""
+            
+            st.info("🔄 Segmentation de l'audio...")
+            segments = segment_audio(audio_path)
+            if not segments:
+                st.error("❌ Échec de la segmentation audio")
+                return ""
+            
+            st.success(f"✅ Audio segmenté en {len(segments)} parties")
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            full_transcript = []
+            BATCH_SIZE = 10
+            
+            for batch_start in range(0, len(segments), BATCH_SIZE):
+                batch_results = process_segment_batch(
+                    segments, batch_start, BATCH_SIZE, len(segments),
+                    temp_dir, progress_bar, status_text
+                )
+                full_transcript.extend(batch_results)
+            
+            if not full_transcript:
+                st.warning("⚠️ Aucun texte n'a été transcrit")
+                return ""
+                
+            st.success("✅ Transcription terminée avec succès")
+            return "\n".join(full_transcript)
+            
+        except Exception as e:
+            st.error(f"❌ Erreur lors de la transcription: {str(e)}")
+            return ""
 
 def process_handwritten_image(image_bytes):
     """Extrait le texte d'une image manuscrite avec mécanisme de retry"""
@@ -965,89 +1173,172 @@ Instructions Détaillées :
         st.error(f"❌ Erreur lors de la génération du PV : {str(e)}")
         return ""
 
-def process_chunked_upload(uploaded_file, chunk_size=1024*1024*1024):  # 1GB chunks
-    """Process a large file upload in chunks"""
-    if 'file_uploader_state' not in st.session_state:
-        st.session_state.file_uploader_state = {
-            'chunks': {},
-            'total_chunks': 0,
-            'current_chunk': 0,
-            'file_hash': None,
-            'complete': False
+def download_video_from_drive(video_url, output_path):
+    """Télécharge une vidéo depuis Google Drive avec gestion des gros fichiers"""
+    try:
+        st.info("🔄 Initialisation du téléchargement...")
+        
+        # Extraire l'ID du fichier
+        file_id = extract_file_id_from_url(video_url)
+        if not file_id:
+            st.error("❌ Format d'URL Google Drive non reconnu")
+            return False
+
+        st.info(f"📝 ID du fichier extrait : {file_id}")
+
+        # Configuration de la session avec des headers complets
+        session = requests.Session()
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'fr,fr-FR;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
-    
-    state = st.session_state.file_uploader_state
-    
-    if uploaded_file is not None:
+
+        # Utiliser l'URL de téléchargement direct avec usercontent
+        download_url = f'https://drive.usercontent.google.com/download?id={file_id}&export=download&authuser=0&confirm=t'
+        st.info(f"🔍 Tentative de téléchargement direct : {download_url}")
+        
+        response = session.get(download_url, headers=headers, stream=True, timeout=30)
+        st.info(f"📡 Code de statut : {response.status_code}")
+        st.info(f"📝 Type de contenu : {response.headers.get('Content-Type', 'Non spécifié')}")
+
+        # Vérifier si nous avons reçu un fichier et non une page HTML
+        content_type = response.headers.get('Content-Type', '').lower()
+        if 'text/html' in content_type:
+            st.warning("⚠️ Redirection vers la page de confirmation détectée")
+            # Essayer l'URL alternative pour les gros fichiers
+            download_url = f'https://drive.usercontent.google.com/download?id={file_id}&export=download&authuser=0&confirm=t&uuid=123&at=123'
+            st.info(f"🔍 Tentative avec URL pour gros fichiers : {download_url}")
+            response = session.get(download_url, headers=headers, stream=True, timeout=30)
+            
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'text/html' in content_type:
+                st.error("❌ Impossible d'accéder au fichier. Assurez-vous que :")
+                st.error("1. Le fichier est partagé avec 'Tout le monde avec le lien'")
+                st.error("2. Vous avez les droits 'Lecteur' sur le fichier")
+                st.error("3. Le fichier n'est pas dans la corbeille")
+                return False
+
+        # Utiliser un nom de fichier temporaire unique
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, f"download_{file_id}_{int(time.time())}.tmp")
+        
         try:
-            # Calculate total chunks needed
-            file_size = len(uploaded_file.getvalue())
-            total_chunks = math.ceil(file_size / chunk_size)
+            # Télécharger avec barre de progression
+            progress_bar = st.progress(0)
+            chunk_size = 500 * 1024 * 1024  # 500MB chunks
+            downloaded_size = 0
             
-            # Calculate file hash for verification
-            file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+            # Obtenir la taille réelle du fichier depuis les headers
+            expected_size = None
+            if 'content-length' in response.headers:
+                expected_size = int(response.headers['content-length'])
+                st.info(f"📦 Taille totale du fichier : {expected_size/1024/1024:.1f} MB")
             
-            # Reset state if it's a new file
-            if state['file_hash'] != file_hash:
-                state['chunks'] = {}
-                state['total_chunks'] = total_chunks
-                state['current_chunk'] = 0
-                state['file_hash'] = file_hash
-                state['complete'] = False
-            
-            # Process the file in chunks
-            with st.spinner(f"Traitement du fichier en cours... ({state['current_chunk']}/{total_chunks} segments)"):
-                progress_bar = st.progress(0)
+            with open(temp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        # Afficher la progression
+                        current_mb = downloaded_size/1024/1024
+                        if expected_size:
+                            current_percent = (downloaded_size/expected_size) * 100
+                            st.info(f"📥 Téléchargé : {current_mb:.1f} MB ({current_percent:.1f}%)")
+                            # Mise à jour de la barre de progression
+                            progress_bar.progress(min(1.0, downloaded_size/expected_size))
+                        else:
+                            # Si on n'a pas la taille totale, afficher juste la taille téléchargée
+                            st.info(f"📥 Téléchargé : {current_mb:.1f} MB")
+
+            # Vérifier le fichier téléchargé
+            if os.path.exists(temp_path):
+                file_size = os.path.getsize(temp_path)
+                if file_size < 10000:  # Moins de 10KB
+                    st.error("❌ Fichier téléchargé invalide ou trop petit")
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                    return False
                 
-                # If we haven't completed the upload yet
-                if not state['complete']:
-                    # Get the next chunk index to process
-                    current_chunk = state['current_chunk']
-                    if str(current_chunk) not in state['chunks'] and current_chunk < total_chunks:
-                        start = current_chunk * chunk_size
-                        end = min(start + chunk_size, file_size)
-                        chunk = uploaded_file.getvalue()[start:end]
-                        
-                        # Store chunk in session state
-                        state['chunks'][str(current_chunk)] = chunk
-                        state['current_chunk'] = current_chunk + 1
-                        
-                        # Update progress
-                        progress = (current_chunk + 1) / total_chunks
-                        progress_bar.progress(progress)
+                # Vérifier les premiers octets pour s'assurer que c'est un fichier VRO
+                with open(temp_path, 'rb') as f:
+                    header = f.read(8)
+                    if not header.startswith(b'DVD') and not header.startswith(b'\x00\x00\x01\xBA'):
+                        st.error("❌ Le fichier téléchargé n'est pas un fichier VRO valide")
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+                        return False
                 
-                # Check if upload is complete
-                if len(state['chunks']) == total_chunks:
-                    state['complete'] = True
-                    
-                    # Reassemble file
-                    complete_file = b''.join(state['chunks'][str(i)] for i in range(total_chunks))
-                    
-                    # Verify hash
-                    if hashlib.md5(complete_file).hexdigest() == state['file_hash']:
-                        # Reset state
-                        state['chunks'] = {}
-                        state['total_chunks'] = 0
-                        state['current_chunk'] = 0
-                        state['file_hash'] = None
-                        state['complete'] = False
-                        
-                        # Return the complete file as bytes
-                        return io.BytesIO(complete_file)
+                # Renommer le fichier temporaire
+                try:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                    os.rename(temp_path, output_path)
+                except Exception as e:
+                    st.error(f"❌ Erreur lors du déplacement du fichier : {str(e)}")
+                    # Essayer de copier le fichier à la place
+                    import shutil
+                    try:
+                        shutil.copy2(temp_path, output_path)
+                        os.remove(temp_path)
+                    except Exception as e2:
+                        st.error(f"❌ Échec de la copie du fichier : {str(e2)}")
+                        return False
+                
+                st.success(f"✅ Téléchargement réussi - Taille : {file_size/1024/1024:.1f} MB")
+                
+                # Convertir si c'est un VRO
+                if output_path.lower().endswith('.vro'):
+                    st.info("🔄 Conversion du fichier VRO en MP4...")
+                    mp4_path = output_path + '.mp4'
+                    if convert_vro_to_mp4(output_path, mp4_path):
+                        try:
+                            os.remove(output_path)
+                            os.rename(mp4_path, output_path)
+                            st.success("✅ Conversion VRO → MP4 réussie")
+                            return True
+                        except Exception as e:
+                            st.error(f"❌ Erreur lors du renommage après conversion : {str(e)}")
+                            return False
                     else:
-                        st.error("❌ Erreur de vérification du fichier. Veuillez réessayer.")
-                        return None
+                        st.error("❌ Échec de la conversion VRO")
+                        if os.path.exists(mp4_path):
+                            try:
+                                os.remove(mp4_path)
+                            except:
+                                pass
+                        return False
                 
-                # If not complete, show progress
-                st.info(f"📤 Chargement en cours : {state['current_chunk']}/{total_chunks} segments traités")
-                return None
-                
-        except MemoryError:
-            st.error("❌ Mémoire insuffisante pour traiter le fichier. Veuillez libérer de la mémoire et réessayer.")
-            return None
+                return True
+            else:
+                st.error("❌ Échec de l'écriture du fichier")
+                return False
+
         except Exception as e:
-            st.error(f"❌ Erreur lors du traitement du fichier : {str(e)}")
-            return None
+            st.error(f"❌ Erreur pendant le téléchargement : {str(e)}")
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass
+            return False
+
+    except Exception as e:
+        st.error(f"❌ Erreur inattendue : {str(e)}")
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+        except:
+            pass
+        return False
 
 def main():
     st.set_page_config(
@@ -1182,43 +1473,106 @@ def main():
     }
 
     # Section d'upload des fichiers
-    st.header("📁 Importation des documents")
+    st.markdown("### 📁 Importation des documents")
     
+    # Style CSS pour contrôler individuellement chaque drag and drop
+    st.markdown("""
+        <style>
+        /* Styles de base pour tous les uploaders */
+        .stFileUploader > div {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        /* Style spécifique pour l'uploader vidéo */
+        [data-testid="stFileUploader"]:has(#video_uploader) {
+            height: 150px;
+            margin-top: 0.5rem;
+            margin-bottom: 1rem;
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        
+        /* Style spécifique pour l'uploader d'images */
+        [data-testid="stFileUploader"]:has(#image_uploader) {
+            height: 180px;
+            margin-top: 0.5rem;
+            margin-bottom: 1rem;
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        
+        /* Style spécifique pour l'uploader PDF */
+        [data-testid="stFileUploader"]:has(#pdf_uploader) {
+            height: 160px;
+            margin-top: 0.75rem;
+            margin-bottom: 1rem;
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        
+        /* Style pour le conteneur des colonnes */
+        .row-widget.stHorizontalBlock {
+            align-items: flex-start;
+            gap: 1.5rem;
+        }
+        
+        /* Style pour les titres des sections */
+        .element-container h3 {
+            margin-bottom: 0.75rem;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Créer trois colonnes de même taille
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        video_file = st.file_uploader(
-            "Importez votre vidéo (MP4, VRO)",
-            type=["mp4", "vro"]
+        st.markdown("### 🎥 Vidéo de la réunion")
+        video_upload_mode = st.radio(
+            "Mode d'importation :",("Uploader un fichier", "Fournir un lien"),
+            horizontal=True,
+            key="video_mode"
         )
-        
-        # Handle chunked upload for video files
-        if video_file is not None:
-            video_data = process_chunked_upload(video_file)
-            if video_data is not None:
-                # Process the complete video file
-                with st.spinner("Traitement de la vidéo en cours..."):
-                    st.session_state.video_transcript = transcribe_video(video_data)
-                    if st.session_state.video_transcript:
-                        st.success("✅ Transcription terminée!")
-                        st.text_area("Transcription:", st.session_state.video_transcript, height=200)
+
+        if video_upload_mode == "Uploader un fichier":
+            st.markdown("Importez votre vidéo")
+            video_file = st.file_uploader(
+                "",
+                type=["mp4", "vro", "mpeg4"],
+                help="Formats acceptés : MP4, VRO, MPEG4 • Limite : 2GB",
+                key="video_uploader"
+            )
+        else:
+            video_url = st.text_input(
+                "Lien de la vidéo",
+                placeholder="https://drive.google.com/file/d/...",
+                help="Lien Google Drive partagé"
+            )
 
     with col2:
+        st.markdown("### 📝 Images manuscrites")
+        st.markdown("Importez vos images")
         image_files = st.file_uploader(
-            "Importez vos images (JPG, PNG)",
+            "",
             type=["jpg", "jpeg", "png"],
-            accept_multiple_files=True
+            accept_multiple_files=True,
+            help="Formats acceptés : JPG, JPEG, PNG • Limite : 2GB par fichier",
+            key="image_uploader"
         )
     
     with col3:
+        st.markdown("### 📄 Documents PDF")
+        st.markdown("Importez vos documents")
         pdf_files = st.file_uploader(
-            "Importez vos documents PDF",
+            "",
             type=["pdf"],
-            accept_multiple_files=True
+            accept_multiple_files=True,
+            help="Format accepté : PDF • Limite : 2GB par fichier",
+            key="pdf_uploader"
         )
 
-    # Bouton pour démarrer le traitement
-    if st.button("🚀 Démarrer le traitement"):
+    # Bouton de démarrage centré avec espace au-dessus
+    st.markdown("<div style='text-align: center; margin-top: 2em;'>", unsafe_allow_html=True)
+    if st.button("🚀 Démarrer le traitement", use_container_width=True):
         if not st.session_state.meeting_info:
             st.error("❌ Veuillez remplir les informations de base du PV avant de commencer le traitement.")
             return
@@ -1228,6 +1582,29 @@ def main():
         images_container = st.container()
         pdfs_container = st.container()
         pv_container = st.container()
+
+        # Traitement de la vidéo
+        if video_file or video_url:
+            with video_container:
+                st.subheader("🎥 Traitement de la vidéo")
+
+                with st.spinner("Transcription en cours..."):
+                    if video_file:
+                        st.session_state.video_transcript = transcribe_video(video_file)
+                    elif video_url:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
+                            temp_video_path = temp_video.name
+                            if download_video_from_drive(video_url, temp_video_path):
+                                if verify_video_file(temp_video_path):
+                                    st.session_state.video_transcript = transcribe_video(open(temp_video_path, "rb"))
+                                else:
+                                    st.error("❌ Le fichier vidéo téléchargé n'est pas valide")
+                            else:
+                                st.error("❌ Échec du téléchargement de la vidéo")
+
+                    if st.session_state.video_transcript:
+                        st.success("✅ Transcription terminée!")
+                        st.text_area("Transcription:", st.session_state.video_transcript, height=200)
 
         # Traitement des images
         if image_files:
@@ -1311,7 +1688,7 @@ def main():
 
         # Génération du PV
         with pv_container:
-            st.subheader("📝 Génération du PV")
+            st.subheader("Génération du PV")
             # Préparer le résumé combiné pour generate_meeting_minutes
             pdf_summary_for_generation = "\n\n".join(
                 [f"[Document: {name}]\n{data.get('summary', '')}" 
@@ -1332,7 +1709,7 @@ def main():
                         
                         # Création et téléchargement du document Word
                         try:
-                            doc_buffer = create_word_pv("logo.png")
+                            doc_buffer = create_word_pv(pv, "logo.png")
                             st.download_button(
                                 label="📎 Télécharger le PV en format Word",
                                 data=doc_buffer,
