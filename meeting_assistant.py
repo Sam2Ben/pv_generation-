@@ -1674,7 +1674,7 @@ def main():
                         
                         col1, col2 = st.columns([1, 1])
                         with col1:
-                            st.image(image, caption=f"Image {idx + 1}: {image_file.name}", use_column_width=True)
+                            st.image(image, caption=f"Image {idx + 1}: {image_file.name}", use_container_width=True)
                         with col2:
                             transcription = process_handwritten_image(image_bytes)
                             if transcription:
