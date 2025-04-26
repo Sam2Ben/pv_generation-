@@ -852,31 +852,25 @@ def create_word_pv(content, logo_path=None):
     
     # --- Extraire et ajouter les recommandations --- 
     recommendations_data = []
-    # reco_marker = "--- RECOMMANDATIONS ---" # Marqueur déjà utilisé plus haut
-    # main_content_for_later = content # Plus nécessaire, content est déjà nettoyé
-    
     # Utiliser directement extracted_reco_text au lieu de chercher à nouveau dans content
     if extracted_reco_text:
-        # Isoler la section des recommandations (déjà fait, on utilise extracted_reco_text)
-        # main_content_part, reco_section = content.split(reco_marker, 1) # Supprimé
-        # main_content_for_later = main_content_part # Supprimé
-
-        # Extraire chaque recommandation depuis extracted_reco_text
+        # Regex plus tolérante et recherche globale
         reco_pattern = re.compile(
-            r"\s*\[RECO\]\s*Domaine=\"(.*?)\"\s*\|\s*Recommandation=\"(.*?)\"\s*\|\s*Responsable=\"(.*?)\"\s*\|\s*Échéance=\"(.*?)\"\s*",
-            re.IGNORECASE
+            r"\[RECO\]\s*Domaine\s*=\s*\"(.*?)\"\s*\|\s*Recommandation\s*=\s*\"(.*?)\"\s*\|\s*Responsable\s*=\s*\"(.*?)\"\s*\|\s*Échéance\s*=\s*\"(.*?)\"",
+            re.IGNORECASE | re.DOTALL
         )
-        for line in extracted_reco_text.strip().split('\n'): # Utilise extracted_reco_text
-            match = reco_pattern.match(line.strip())
-            if match:
-                recommendations_data.append({
-                    "Domaine": match.group(1).strip(),
-                    "Recommandations": match.group(2).strip(),
-                    "Responsable": match.group(3).strip(),
-                    "Échéance": match.group(4).strip()
-                })
-            elif line.strip(): # Log si une ligne non vide ne correspond pas
-                 print(f"[WARN] Ligne de recommandation non reconnue: {line.strip()}")
+        matches = reco_pattern.findall(extracted_reco_text)
+        for match in matches:
+            recommendations_data.append({
+                "Domaine": match[0].strip(),
+                "Recommandations": match[1].strip(),
+                "Responsable": match[2].strip(),
+                "Échéance": match[3].strip()
+            })
+        # Log les lignes qui commencent par [RECO] mais ne matchent pas
+        for line in extracted_reco_text.strip().split('\n'):
+            if line.strip().startswith('[RECO]') and not reco_pattern.match(line.strip()):
+                print(f"[WARN] Ligne de recommandation non reconnue: {line.strip()}")
 
     # Remplacer le contenu traité pour ne plus inclure la section reco
     # content = main_content_for_later # Supprimé, content est déjà propre
@@ -1564,10 +1558,11 @@ def main():
         if video_upload_mode == "Uploader un fichier":
             st.markdown("Importez votre vidéo")
             video_file = st.file_uploader(
-                "",
+                "Importer une vidéo",  # label non vide
                 type=["mp4", "vro", "mpeg4"],
                 help="Formats acceptés : MP4, VRO, MPEG4 • Limite : 2GB",
-                key="video_uploader"
+                key="video_uploader",
+                label_visibility="collapsed"  # label masqué
             )
         else:
             video_url = st.text_input(
@@ -1580,22 +1575,24 @@ def main():
         st.markdown("### 📝 Images manuscrites")
         st.markdown("Importez vos images")
         image_files = st.file_uploader(
-            "",
+            "Importer des images",  # label non vide
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             help="Formats acceptés : JPG, JPEG, PNG • Limite : 2GB par fichier",
-            key="image_uploader"
+            key="image_uploader",
+            label_visibility="collapsed"  # label masqué
         )
     
     with col3:
         st.markdown("### 📄 Documents PDF")
         st.markdown("Importez vos documents")
         pdf_files = st.file_uploader(
-            "",
+            "Importer des PDF",  # label non vide
             type=["pdf"],
             accept_multiple_files=True,
             help="Format accepté : PDF • Limite : 2GB par fichier",
-            key="pdf_uploader"
+            key="pdf_uploader",
+            label_visibility="collapsed"  # label masqué
         )
 
     # Bouton de démarrage centré avec espace au-dessus
