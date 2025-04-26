@@ -13,6 +13,8 @@ from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import re
+import hashlib
+import math
 
 # Configuration des APIs
 def configure_apis():
@@ -963,6 +965,90 @@ Instructions Détaillées :
         st.error(f"❌ Erreur lors de la génération du PV : {str(e)}")
         return ""
 
+def process_chunked_upload(uploaded_file, chunk_size=1024*1024*1024):  # 1GB chunks
+    """Process a large file upload in chunks"""
+    if 'file_uploader_state' not in st.session_state:
+        st.session_state.file_uploader_state = {
+            'chunks': {},
+            'total_chunks': 0,
+            'current_chunk': 0,
+            'file_hash': None,
+            'complete': False
+        }
+    
+    state = st.session_state.file_uploader_state
+    
+    if uploaded_file is not None:
+        try:
+            # Calculate total chunks needed
+            file_size = len(uploaded_file.getvalue())
+            total_chunks = math.ceil(file_size / chunk_size)
+            
+            # Calculate file hash for verification
+            file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
+            
+            # Reset state if it's a new file
+            if state['file_hash'] != file_hash:
+                state['chunks'] = {}
+                state['total_chunks'] = total_chunks
+                state['current_chunk'] = 0
+                state['file_hash'] = file_hash
+                state['complete'] = False
+            
+            # Process the file in chunks
+            with st.spinner(f"Traitement du fichier en cours... ({state['current_chunk']}/{total_chunks} segments)"):
+                progress_bar = st.progress(0)
+                
+                # If we haven't completed the upload yet
+                if not state['complete']:
+                    # Get the next chunk index to process
+                    current_chunk = state['current_chunk']
+                    if str(current_chunk) not in state['chunks'] and current_chunk < total_chunks:
+                        start = current_chunk * chunk_size
+                        end = min(start + chunk_size, file_size)
+                        chunk = uploaded_file.getvalue()[start:end]
+                        
+                        # Store chunk in session state
+                        state['chunks'][str(current_chunk)] = chunk
+                        state['current_chunk'] = current_chunk + 1
+                        
+                        # Update progress
+                        progress = (current_chunk + 1) / total_chunks
+                        progress_bar.progress(progress)
+                
+                # Check if upload is complete
+                if len(state['chunks']) == total_chunks:
+                    state['complete'] = True
+                    
+                    # Reassemble file
+                    complete_file = b''.join(state['chunks'][str(i)] for i in range(total_chunks))
+                    
+                    # Verify hash
+                    if hashlib.md5(complete_file).hexdigest() == state['file_hash']:
+                        # Reset state
+                        state['chunks'] = {}
+                        state['total_chunks'] = 0
+                        state['current_chunk'] = 0
+                        state['file_hash'] = None
+                        state['complete'] = False
+                        
+                        # Return the complete file as bytes
+                        return io.BytesIO(complete_file)
+                    else:
+                        st.error("❌ Erreur de vérification du fichier. Veuillez réessayer.")
+                        return None
+                
+                # If not complete, show progress
+                st.info(f"📤 Chargement en cours : {state['current_chunk']}/{total_chunks} segments traités")
+                return None
+                
+        except MemoryError:
+            st.error("❌ Mémoire insuffisante pour traiter le fichier. Veuillez libérer de la mémoire et réessayer.")
+            return None
+        except Exception as e:
+            st.error(f"❌ Erreur lors du traitement du fichier : {str(e)}")
+            return None
+
 def main():
     st.set_page_config(
         page_title="Assistant de Réunion CMR",
@@ -1101,25 +1187,22 @@ def main():
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.write("**🎥 Vidéo de la réunion**")
-        video_upload_mode = st.radio(
-            "Mode d'importation de la vidéo :", 
-            ("Uploader un fichier", "Fournir un lien"),
-            horizontal=True
+        video_file = st.file_uploader(
+            "Importez votre vidéo (MP4, VRO)",
+            type=["mp4", "vro"]
         )
+        
+        # Handle chunked upload for video files
+        if video_file is not None:
+            video_data = process_chunked_upload(video_file)
+            if video_data is not None:
+                # Process the complete video file
+                with st.spinner("Traitement de la vidéo en cours..."):
+                    st.session_state.video_transcript = transcribe_video(video_data)
+                    if st.session_state.video_transcript:
+                        st.success("✅ Transcription terminée!")
+                        st.text_area("Transcription:", st.session_state.video_transcript, height=200)
 
-        video_file = None
-        video_url = None
-
-        if video_upload_mode == "Uploader un fichier":
-            video_file = st.file_uploader(
-                "Importez votre vidéo (MP4, VRO)",
-                type=["mp4", "vro"]
-            )
-        else:
-            video_url = st.text_input("Collez ici le lien de la vidéo (lien direct ou Drive partagé)")
-
-    
     with col2:
         image_files = st.file_uploader(
             "Importez vos images (JPG, PNG)",
@@ -1145,53 +1228,6 @@ def main():
         images_container = st.container()
         pdfs_container = st.container()
         pv_container = st.container()
-
-        # Traitement de la vidéo
-        if video_file or video_url:
-            with video_container:
-                st.subheader("🎥 Traitement de la vidéo")
-
-                with st.spinner("Transcription en cours..."):
-                    if video_file:
-                        st.session_state.video_transcript = transcribe_video(video_file)
-
-                    elif video_url:
-                        try:
-                            # Si c’est un lien direct Google Drive (drive.googleusercontent.com)
-                            if "drive.googleusercontent.com" in video_url:
-                                st.info("📥 Téléchargement de la vidéo depuis Google Drive...")
-                                import requests
-                                from urllib.parse import urlparse, parse_qs
-
-                                # Extraire l’ID de fichier
-                                parsed_url = urlparse(video_url)
-                                file_id = parse_qs(parsed_url.query).get("id", [None])[0]
-
-                                if not file_id:
-                                    st.error("❌ Lien Google Drive invalide (ID non trouvé).")
-                                else:
-                                    download_url = f"https://drive.googleusercontent.com/uc?export=download&id={file_id}"
-                                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
-                                        response = requests.get(download_url, stream=True)
-                                        if response.status_code == 200:
-                                            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                                                temp_video.write(chunk)
-                                            temp_video_path = temp_video.name
-                                            with open(temp_video_path, "rb") as f:
-                                                st.session_state.video_transcript = transcribe_video(f)
-                                        else:
-                                            st.error("❌ Erreur lors du téléchargement de la vidéo Google Drive.")
-                            else:
-                                st.warning("⚠️ Seuls les liens directs Google Drive sont supportés pour l'instant.")
-                        except Exception as e:
-                            st.error(f"❌ Erreur lors du traitement du lien vidéo : {str(e)}")
-
-                    if st.session_state.video_transcript:
-                        st.success("✅ Transcription terminée!")
-                        st.text_area("Transcription:", st.session_state.video_transcript, height=200)
-
-
-                    
 
         # Traitement des images
         if image_files:
@@ -1296,7 +1332,7 @@ def main():
                         
                         # Création et téléchargement du document Word
                         try:
-                            doc_buffer = create_word_pv(pv, "logo.png")
+                            doc_buffer = create_word_pv("logo.png")
                             st.download_button(
                                 label="📎 Télécharger le PV en format Word",
                                 data=doc_buffer,
