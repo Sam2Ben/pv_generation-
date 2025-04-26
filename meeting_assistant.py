@@ -1540,29 +1540,46 @@ def main():
         </style>
     """, unsafe_allow_html=True)
     
-    # Créer trois colonnes de même taille
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
+
+
+    # Créer d'abord les titres dans une rangée
+    title_cols = st.columns(3)
+    with title_cols[0]:
         st.markdown("### 🎥 Vidéo de la réunion")
+    with title_cols[1]:
+        st.markdown("### 📝 Images manuscrites")
+    with title_cols[2]:
+        st.markdown("### 📄 Documents PDF")
+
+    # Ensuite, créer les options radio pour la vidéo dans une rangée séparée
+    radio_col, empty_col1, empty_col2 = st.columns(3)
+    with radio_col:
         video_upload_mode = st.radio(
             "Mode d'importation :",("Uploader un fichier", "Fournir un lien"),
             horizontal=True,
             key="video_mode"
         )
 
-        # Initialiser video_file à None
-        video_file = None
-        video_url = None
-
+    # Ensuite, créer les textes d'instructions dans une rangée séparée
+    text_cols = st.columns(3)
+    with text_cols[0]:
         if video_upload_mode == "Uploader un fichier":
             st.markdown("Importez votre vidéo")
+    with text_cols[1]:
+        st.markdown("Importez vos images")
+    with text_cols[2]:
+        st.markdown("Importez vos documents")
+
+    # Enfin, créer les zones de téléchargement dans une rangée séparée
+    upload_cols = st.columns(3)
+    with upload_cols[0]:
+        if video_upload_mode == "Uploader un fichier":
             video_file = st.file_uploader(
-                "Importer une vidéo",  # label non vide
+                "Importer une vidéo",
                 type=["mp4", "vro", "mpeg4"],
                 help="Formats acceptés : MP4, VRO, MPEG4 • Limite : 2GB",
                 key="video_uploader",
-                label_visibility="collapsed"  # label masqué
+                label_visibility="collapsed"
             )
         else:
             video_url = st.text_input(
@@ -1570,29 +1587,23 @@ def main():
                 placeholder="https://drive.google.com/file/d/...",
                 help="Lien Google Drive partagé"
             )
-
-    with col2:
-        st.markdown("### 📝 Images manuscrites")
-        st.markdown("Importez vos images")
+    with upload_cols[1]:
         image_files = st.file_uploader(
-            "Importer des images",  # label non vide
+            "Importer des images",
             type=["jpg", "jpeg", "png"],
             accept_multiple_files=True,
             help="Formats acceptés : JPG, JPEG, PNG • Limite : 2GB par fichier",
             key="image_uploader",
-            label_visibility="collapsed"  # label masqué
+            label_visibility="collapsed"
         )
-    
-    with col3:
-        st.markdown("### 📄 Documents PDF")
-        st.markdown("Importez vos documents")
+    with upload_cols[2]:
         pdf_files = st.file_uploader(
-            "Importer des PDF",  # label non vide
+            "Importer des PDF",
             type=["pdf"],
             accept_multiple_files=True,
             help="Format accepté : PDF • Limite : 2GB par fichier",
             key="pdf_uploader",
-            label_visibility="collapsed"  # label masqué
+            label_visibility="collapsed"
         )
 
     # Bouton de démarrage centré avec espace au-dessus
