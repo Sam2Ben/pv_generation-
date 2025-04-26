@@ -222,12 +222,12 @@ def extract_audio_from_video(input_video_path, output_audio_path):
             st.warning(f"⚠️ Erreur lors du nettoyage des fichiers temporaires: {str(e)}")
 
 def segment_audio(audio_path, segment_length_ms=120000):
-    """Divise un gros fichier audio en segments sans tout charger en RAM"""
+    """Divise un gros fichier audio en segments sans tout charger en RAM (version ultra-optimisée)"""
     try:
         import math
         import subprocess
         
-        # Utiliser ffmpeg pour obtenir la durée totale
+        # Utiliser ffprobe pour obtenir la durée
         result = subprocess.run([
             'ffprobe', '-v', 'error', '-show_entries',
             'format=duration', '-of',
@@ -238,13 +238,14 @@ def segment_audio(audio_path, segment_length_ms=120000):
         segment_length_sec = segment_length_ms / 1000
         
         num_segments = math.ceil(total_duration / segment_length_sec)
-        segments = []
-        
+        segment_paths = []  # Stocker uniquement les chemins
+
+        temp_dir = tempfile.gettempdir()
+
         for i in range(num_segments):
             start_time = i * segment_length_sec
-            temp_segment_path = os.path.join(tempfile.gettempdir(), f"segment_{i+1}.mp3")
+            temp_segment_path = os.path.join(temp_dir, f"segment_{i+1}.mp3")
             
-            # Extraire un petit segment avec ffmpeg sans tout charger
             extract_cmd = [
                 "ffmpeg",
                 "-y",
@@ -257,30 +258,34 @@ def segment_audio(audio_path, segment_length_ms=120000):
             subprocess.run(extract_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
             
             if os.path.exists(temp_segment_path):
-                segment_audio = AudioSegment.from_file(temp_segment_path)
-                segments.append(segment_audio)
+                segment_paths.append(temp_segment_path)
+
+        return segment_paths
         
-        return segments
+    except Exception as e:
+        st.error(f"❌ Erreur lors de la segmentation audio (stream) : {str(e)}")
+        return []
+
         
     except Exception as e:
         st.error(f"❌ Erreur lors de la segmentation audio (stream) : {str(e)}")
         return []
 
 
-def process_segment_batch(segments, start_idx, batch_size, total_segments, temp_dir, progress_bar, status_text):
-    """Traite un lot de segments audio"""
+def process_segment_batch(segments, start_idx, batch_size, total_segments, progress_bar, status_text):
+    """Traite un lot de segments audio (optimisé sans chargement mémoire)"""
     batch_transcript = []
     
     for i in range(start_idx, min(start_idx + batch_size, total_segments)):
-        segment = segments[i]
+        segment_path = segments[i]  # Maintenant segments contient des chemins de fichier
         segment_number = i + 1
         try:
-            segment_path = os.path.join(temp_dir, f"segment_{segment_number}.mp3")
             # Mise à jour du message unique de progression
             status_text.text(f"🎯 Traitement du segment {segment_number}/{total_segments}")
-            segment.export(segment_path, format="mp3")
+            
             with open(segment_path, "rb") as f:
                 audio_bytes = f.read()
+                
             model = genai.GenerativeModel('gemini-2.0-flash')
             response = model.generate_content([
                 "Transcrivez ce segment audio mot pour mot en français.",
@@ -289,13 +294,20 @@ def process_segment_batch(segments, start_idx, batch_size, total_segments, temp_
             if response.text:
                 batch_transcript.append(response.text)
                 progress_bar.progress((i + 1)/total_segments)
+                
+            # Nettoyage immédiat du segment pour libérer l'espace
+            os.remove(segment_path)
+            
         except Exception as e:
             st.warning(f"⚠️ Erreur sur le segment {segment_number}: {str(e)}")
             batch_transcript.append(f"[Segment {segment_number} non transcrit]")
-        time.sleep(random.uniform(1, 2))
+        
+        time.sleep(random.uniform(1, 2))  # Attente pour respecter quotas API
+        
     # Message final de fin de lot
     status_text.text("Traitement du lot terminé.")
     return batch_transcript
+
 
 def transcribe_video(video_file):
     """Transcrit une vidéo en texte sans charger tout en RAM."""
