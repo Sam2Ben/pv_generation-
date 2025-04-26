@@ -1580,6 +1580,10 @@ def main():
     with text_cols[2]:
         st.markdown("Importez vos documents")
 
+    # Initialiser video_file et video_url à None pour éviter UnboundLocalError
+    video_file = None
+    video_url = None
+
     # Enfin, créer les zones de téléchargement dans une rangée séparée
     upload_cols = st.columns(3)
     with upload_cols[0]:
