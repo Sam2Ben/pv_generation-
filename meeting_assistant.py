@@ -290,9 +290,14 @@ def transcribe_video(video_file):
             # Écrire le fichier vidéo
             with open(video_path, "wb") as f:
                 if hasattr(video_file, 'read'):
-                    f.write(video_file.read())
+                    while True:
+                        chunk = video_file.read(65536)  # 64 KB par lecture
+                        if not chunk:
+                            break
+                        f.write(chunk)
                 else:
                     f.write(video_file.getvalue())
+
             
             # Si c'est un fichier VRO, le convertir d'abord
             if video_path.lower().endswith('.vro'):
