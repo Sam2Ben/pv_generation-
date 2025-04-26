@@ -222,18 +222,50 @@ def extract_audio_from_video(input_video_path, output_audio_path):
             st.warning(f"⚠️ Erreur lors du nettoyage des fichiers temporaires: {str(e)}")
 
 def segment_audio(audio_path, segment_length_ms=120000):
-    """Divise un fichier audio en segments de 2 minutes"""
+    """Divise un gros fichier audio en segments sans tout charger en RAM"""
     try:
-        audio = AudioSegment.from_file(audio_path)
+        import math
+        import subprocess
+        
+        # Utiliser ffmpeg pour obtenir la durée totale
+        result = subprocess.run([
+            'ffprobe', '-v', 'error', '-show_entries',
+            'format=duration', '-of',
+            'default=noprint_wrappers=1:nokey=1', audio_path
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        
+        total_duration = float(result.stdout)
+        segment_length_sec = segment_length_ms / 1000
+        
+        num_segments = math.ceil(total_duration / segment_length_sec)
         segments = []
-        for start in range(0, len(audio), segment_length_ms):
-            end = start + segment_length_ms
-            segment = audio[start:min(end, len(audio))]
-            segments.append(segment)
+        
+        for i in range(num_segments):
+            start_time = i * segment_length_sec
+            temp_segment_path = os.path.join(tempfile.gettempdir(), f"segment_{i+1}.mp3")
+            
+            # Extraire un petit segment avec ffmpeg sans tout charger
+            extract_cmd = [
+                "ffmpeg",
+                "-y",
+                "-i", audio_path,
+                "-ss", str(start_time),
+                "-t", str(segment_length_sec),
+                "-c", "copy",
+                temp_segment_path
+            ]
+            subprocess.run(extract_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            
+            if os.path.exists(temp_segment_path):
+                segment_audio = AudioSegment.from_file(temp_segment_path)
+                segments.append(segment_audio)
+        
         return segments
+        
     except Exception as e:
-        st.error(f"❌ Erreur lors de la segmentation audio : {str(e)}")
+        st.error(f"❌ Erreur lors de la segmentation audio (stream) : {str(e)}")
         return []
+
 
 def process_segment_batch(segments, start_idx, batch_size, total_segments, temp_dir, progress_bar, status_text):
     """Traite un lot de segments audio"""
