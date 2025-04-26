@@ -1533,6 +1533,10 @@ def main():
             key="video_mode"
         )
 
+        # Initialiser video_file à None
+        video_file = None
+        video_url = None
+
         if video_upload_mode == "Uploader un fichier":
             st.markdown("Importez votre vidéo")
             video_file = st.file_uploader(
@@ -1584,14 +1588,13 @@ def main():
         pv_container = st.container()
 
         # Traitement de la vidéo
-        if video_file or video_url:
-            with video_container:
-                st.subheader("🎥 Traitement de la vidéo")
-
+        with video_container:
+            st.subheader("🎥 Traitement de la vidéo")
+            if video_file or (video_url and video_url.strip()):  # Vérifier si on a soit un fichier soit une URL valide
                 with st.spinner("Transcription en cours..."):
                     if video_file:
                         st.session_state.video_transcript = transcribe_video(video_file)
-                    elif video_url:
+                    elif video_url and video_url.strip():
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
                             temp_video_path = temp_video.name
                             if download_video_from_drive(video_url, temp_video_path):
@@ -1605,6 +1608,8 @@ def main():
                     if st.session_state.video_transcript:
                         st.success("✅ Transcription terminée!")
                         st.text_area("Transcription:", st.session_state.video_transcript, height=200)
+            else:
+                st.info("ℹ️ Aucune vidéo n'a été fournie")
 
         # Traitement des images
         if image_files:
