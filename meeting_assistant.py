@@ -19,6 +19,21 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 import json
 from bs4 import BeautifulSoup
+import av
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
+from st_audiorec import st_audiorec
+import tempfile
+import os
+from docx import Document
+from docx.shared import Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import io
+import datetime
+import re
+from datetime import datetime
+from docx.oxml.ns import qn
+import concurrent.futures
+
 
 # Configuration des APIs
 def configure_apis():
@@ -273,38 +288,43 @@ def segment_audio(audio_path, segment_length_ms=120000):
 
 
 def process_segment_batch(segments, start_idx, batch_size, total_segments, progress_bar, status_text):
-    """Traite un lot de segments audio (optimisé sans chargement mémoire)"""
+    """Traite un lot de segments audio (optimisé sans chargement mémoire) avec timeout par segment et feedback UX amélioré."""
     batch_transcript = []
-    
+    SEGMENT_TIMEOUT = 30  # secondes
+    start_time = time.time()
     for i in range(start_idx, min(start_idx + batch_size, total_segments)):
         segment_path = segments[i]  # Maintenant segments contient des chemins de fichier
         segment_number = i + 1
         try:
-            # Mise à jour du message unique de progression
             status_text.text(f"🎯 Traitement du segment {segment_number}/{total_segments}")
-            
             with open(segment_path, "rb") as f:
                 audio_bytes = f.read()
-                
             model = genai.GenerativeModel('gemini-2.0-flash')
-            response = model.generate_content([
-                "Transcrivez ce segment audio mot pour mot en français.",
-                {"mime_type": "audio/mp3", "data": audio_bytes}
-            ])
-            if response.text:
-                batch_transcript.append(response.text)
-                progress_bar.progress((i + 1)/total_segments)
-                
-            # Nettoyage immédiat du segment pour libérer l'espace
+            def call_gemini():
+                return model.generate_content([
+                    "Transcrivez ce segment audio mot pour mot en français.",
+                    {"mime_type": "audio/mp3", "data": audio_bytes}
+                ])
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(call_gemini)
+                try:
+                    response = future.result(timeout=SEGMENT_TIMEOUT)
+                    if response.text:
+                        batch_transcript.append(response.text)
+                        progress_bar.progress((i + 1)/total_segments)
+                    else:
+                        batch_transcript.append(f"[Segment {segment_number} non transcrit]")
+                except concurrent.futures.TimeoutError:
+                    st.warning(f"⏰ Timeout sur le segment {segment_number} (>{SEGMENT_TIMEOUT}s)")
+                    batch_transcript.append(f"[Segment {segment_number} timeout]")
             os.remove(segment_path)
-            
         except Exception as e:
             st.warning(f"⚠️ Erreur sur le segment {segment_number}: {str(e)}")
             batch_transcript.append(f"[Segment {segment_number} non transcrit]")
-        
+        elapsed = time.time() - start_time
+        if elapsed > 120:
+            st.warning("⏳ Le traitement audio prend plus de 2 minutes. Merci de patienter ou essayez avec un fichier plus court.")
         time.sleep(random.uniform(1, 2))  # Attente pour respecter quotas API
-        
-    # Message final de fin de lot
     status_text.text("Traitement du lot terminé.")
     return batch_transcript
 
@@ -553,432 +573,232 @@ def process_pdf(pdf_file):
         st.error(f"❌ Erreur lors de l'analyse du PDF {pdf_file.name}: {str(e)}")
         return {"summary": f"[Erreur lors de l'analyse du PDF: {str(e)}]", "acronyms": {}}
 
-def create_word_pv(content, logo_path=None):
-    """Crée un document Word à partir du contenu du PV avec un formatage professionnel.
-       Utilise les données PDF pré-analysées depuis st.session_state.pdf_data.
-    """
-    doc = Document()
-    
-    # Récupérer les données PDF et meeting_info depuis st.session_state
-    pdf_data = st.session_state.get('pdf_data', {})
-    meeting_info = st.session_state.get('meeting_info', {})
 
-    # --- Début de la modification : Extraire et supprimer la section RECOMMANDATIONS --- 
-    extracted_reco_text = "" # Initialiser la variable pour le texte des recos
-    reco_marker = "--- RECOMMANDATIONS ---"
-    if reco_marker in content:
-        # Séparer le contenu principal de la section des recommandations
-        main_content_part, reco_section = content.split(reco_marker, 1)
-        content = main_content_part.strip() # Mettre à jour le contenu principal
-        extracted_reco_text = reco_section.strip() # Stocker la section des recos
-    # --- Fin de la modification ---
-    
-    # Style du document
-    style = doc.styles['Normal']
-    style.font.name = 'Times New Roman'
-    style.font.size = Pt(12)
-    
-    # Fonction utilitaire pour formater les cellules de tableau
-    def format_table_cell(cell, text, alignment=WD_ALIGN_PARAGRAPH.LEFT, bold=False):
-        # Vide le contenu précédent de la cellule
-        while len(cell.paragraphs) > 1:
-            p = cell.paragraphs[-1]
-            cell._element.remove(p._element)
-        
-        if not cell.paragraphs:
-            p = cell.add_paragraph()
-        else:
-            p = cell.paragraphs[0]
-        
-        # Vide le contenu du paragraphe
-        for run in p.runs:
-            run.clear()
-        
-        # Ajoute le nouveau texte et applique le formatage
-        run = p.add_run(text)
-        run.bold = bold
+def create_word_pv(pv_text, meeting_info):
+    doc = Document()
+
+    # === En-tête centré ===
+    section = doc.sections[0]
+    header = section.header
+    header_para = header.paragraphs[0]
+    header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    header_text = (
+        'TANGER MED PORT AUTHORITY S.A "TMPA"\n'
+        'SOCIÉTÉ ANONYME À CONSEIL D\'ADMINISTRATION\n'
+        'AU CAPITAL DE 1.704.000.000 DIRHAMS CONVERTIBLES\n'
+        'SIÈGE SOCIAL : ZONE FRANCHE DE KSAR EL MAJAZ, OUED RMEL,\n'
+        'COMMUNE ANJRA ROUTE DE FNIDEQ – TANGER\n'
+        'RC N°45349 TANGER – ICE : 000053443000022'
+    )
+    header_para.text = header_text
+    for run in header_para.runs:
+        run.font.size = Pt(9)
+        run.bold = True
         run.font.name = 'Times New Roman'
-        run.font.size = Pt(12)
-        p.alignment = alignment
-    
-    # En-tête avec logo et texte
-    header_table = doc.add_table(rows=1, cols=3)
-    header_table.style = 'Table Grid'
-    
-    # Colonne gauche (texte français)
-    left_cell = header_table.cell(0, 0)
-    left_text = left_cell.add_paragraph()
-    left_text.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    left_text.add_run("Royaume du Maroc\nCaisse Marocaine des\nRetraites\nConseil d'Administration\nComité d'Audit")
-    
-    # Colonne centrale (logo)
-    center_cell = header_table.cell(0, 1)
-    try:
-        logo_run = center_cell.paragraphs[0].add_run()
-        logo_run.add_picture(logo_path, width=Inches(1.5))
-        center_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-    except:
-        pass
-    
-    # Colonne droite (texte arabe)
-    right_cell = header_table.cell(0, 2)
-    right_text = right_cell.add_paragraph()
-    right_text.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    right_text.add_run("المملكة المغربية\nالصندوق المغربي\nللتقاعد\nالمجلس الإداري\nلجنة التدقيق")
-    
-    # Ligne de séparation
-    doc.add_paragraph().add_run("_" * 70)
-    
-    # Titre du PV
+
+    doc.add_paragraph()
+
+    # === Titre centré ===
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    # Récupérer le numéro du PV depuis st.session_state
-    pv_number = meeting_info.get('pv_number', '[Numéro PV]') # Valeur par défaut si non trouvé
-    title_text = f"PROCÈS-VERBAL DÉTAILLÉ N° {pv_number} DE LA RÉUNION DU COMITÉ D'AUDIT"
-    title_run = title.add_run(title_text)
-    title_run.bold = True
-    title_run.font.size = Pt(14)
-    
-    doc.add_paragraph()  # Espace
-    
-    # Tableau d'informations
-    info_table = doc.add_table(rows=4, cols=2)
-    info_table.style = 'Table Grid'
-    info_table.autofit = False
-    
-    # Récupérer les informations de la réunion depuis st.session_state
-    info_rows = [
-        ("Date", meeting_info.get('date', '')),
-        ("Lieu", meeting_info.get('lieu', '')),
-        ("Heure début", meeting_info.get('heure_debut', '')),
-        ("Heure fin", meeting_info.get('heure_fin', ''))
-    ]
-    
-    # Remplir le tableau d'informations
-    for i, (label, value) in enumerate(info_rows):
-        cells = info_table.rows[i].cells
-        cells[0].text = label
-        cells[1].text = value
-        # Définir les largeurs
-        cells[0].width = Inches(1.5)
-        cells[1].width = Inches(4.5)
-    
-    doc.add_paragraph()  # Espace
-    
-    # Section "ÉTAIENT PRÉSENTS :"
-    presents_title = doc.add_paragraph()
-    presents_title.add_run("ÉTAIENT PRÉSENTS :").bold = True
-    
-    # Fonction pour créer un tableau de participants
-    def create_participants_table(participants, section_title=None):
-        if section_title:
-            section_para = doc.add_paragraph()
-            section_para.add_run(section_title).bold = True
-        
-        table = doc.add_table(rows=len(participants), cols=2)
-        table.style = 'Table Grid'
-        table.autofit = False
-        
-        for i, (name, title) in enumerate(participants):
-            cells = table.rows[i].cells
-            # Formater le nom avec un tiret
-            cells[0].text = f"- {name}" if not name.startswith("-") else name
-            cells[1].text = title
-            # Définir les largeurs
-            cells[0].width = Inches(3.0)
-            cells[1].width = Inches(3.0)
-        
-        return table
-    
-    # Ajouter les participants par section
-    participants_by_section = meeting_info.get('participants_by_section', {})
-    
-    # Ajouter les participants par section
-    for section, participants in participants_by_section.items():
-        if participants:
-            doc.add_paragraph()  # Espace avant la section
-            create_participants_table(participants, section)
-    
+    run = title.add_run("PROCÈS VERBAL DE LA RÉUNION DU CONSEIL D'ADMINISTRATION\n")
+    run.bold = True
+    run.font.size = Pt(13)
+    run.font.name = 'Times New Roman'
+
+    # Date centrée
+    try:
+        date_str = meeting_info.get("date", "")
+        date_obj = datetime.strptime(date_str, "%d/%m/%Y")
+        formatted_date = date_obj.strftime("DU %d %B %Y").upper()
+    except:
+        formatted_date = f"DU {date_str}"
+    date_p = doc.add_paragraph(formatted_date)
+    date_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    date_p.runs[0].bold = True
+    date_p.runs[0].font.size = Pt(12)
+
     doc.add_paragraph()
-    
-    # Traitement du contenu principal
-    sections = content.split('\n\n')
-    ordre_du_jour_processed = False
-    in_ordre_du_jour = False
-    
-    for section in sections:
-        section_stripped = section.strip()
-        if not section_stripped:
-            continue
-            
-        # Traiter l'ordre du jour une seule fois
-        if not ordre_du_jour_processed and "ORDRE DU JOUR" in section.upper():
-            in_ordre_du_jour = True
-            ordre_du_jour_processed = True
-            
-            # Titre "ORDRE DU JOUR :"
-            p_title = doc.add_paragraph()
-            run_title = p_title.add_run("ORDRE DU JOUR :")
-            run_title.font.name = 'Times New Roman'
-            run_title.font.size = Pt(12)
-            run_title.bold = True
-            p_title.paragraph_format.space_after = Pt(12)
-            
-            continue
-            
-        # Traiter les points de l'ordre du jour
-        if in_ordre_du_jour:
-            if re.match(r'^\d+\.', section_stripped):
-                p_point = doc.add_paragraph()
-                p_point.paragraph_format.left_indent = Inches(0.5)
-                p_point.paragraph_format.space_before = Pt(0)
-                p_point.paragraph_format.space_after = Pt(0)
-                run_point = p_point.add_run(section_stripped)
-                run_point.font.name = 'Times New Roman'
-                run_point.font.size = Pt(12)
-            elif "L'ordre du jour proposé" in section_stripped:
-                in_ordre_du_jour = False
-                # Ajouter un paragraphe vide avant
-                doc.add_paragraph()
-                
-                # Phrase de transition
-                p_transition = doc.add_paragraph()
-                p_transition.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                p_transition.paragraph_format.left_indent = Inches(0)
-                run_transition = p_transition.add_run(section_stripped)
-                run_transition.font.name = 'Times New Roman'
-                run_transition.font.size = Pt(12)
-                
-                # Ajouter un paragraphe vide après
-                doc.add_paragraph()
-            continue
-            
-        # Traitement des sections principales (numérotées)
-        if re.match(r"^\d+\.\s", section_stripped):
-            doc.add_paragraph()  # Espace avant nouvelle section
-            p = doc.add_paragraph()
-            run = p.add_run(section_stripped)
-            run.bold = True
-            p.paragraph_format.space_before = Pt(6)
-            p.paragraph_format.space_after = Pt(6)
-            continue # Passer à la section suivante
 
-        # Traiter les tableaux uniquement s'ils ne sont pas des recommandations
-        if '|' in section and not any(marker in section.lower() for marker in ['recommandation', 'recommendation']):
-            # Détecter et créer un tableau
-            rows = [row.strip() for row in section.split('\n') if '|' in row and not row.strip().startswith('|-')]
-            if rows:
-                try:
-                    num_cols = len(rows[0].split('|')) - 2
-                    if num_cols <= 0:
-                        print(f"[WARN] Table dynamique détectée avec {num_cols} colonnes. Ignorée.")
-                        continue
-                    
-                    table = doc.add_table(rows=len(rows), cols=num_cols)
-                    table.style = 'Table Grid'
-                    table.autofit = False
-                    
-                    # Calculer les largeurs de colonnes
-                    total_width = 6.0
-                    col_width = total_width / num_cols
-                    
-                    # Appliquer les largeurs et remplir le tableau
-                    for i, row_text in enumerate(rows):
-                        try:
-                            cells_content = [cell.strip() for cell in row_text.split('|')[1:-1]]
-                            if len(cells_content) != num_cols:
-                                print(f"[WARN] Ligne {i} table dynamique a {len(cells_content)} cellules, attendu {num_cols}. Ligne ignorée.")
-                                continue
+    # === Introduction formelle ===
+    intro = doc.add_paragraph()
+    intro.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    try:
+        year = date_obj.year % 100
+        date_lettres = date_obj.strftime('%d %B').capitalize()
+        heure = meeting_info.get('heure_debut', '')
+        lieu = meeting_info.get('lieu', '')
+    except:
+        year = 'XX'
+        date_lettres = '[jour mois écrit en lettres]'
+        heure = '[Heure]'
+        lieu = '[Lieu]'
+    intro_text = f"L'An Deux Mille {year}, Le {date_lettres}, À {heure} heures."
+    intro.add_run(intro_text)
+    doc.add_paragraph()
+    doc.add_paragraph(f"Les membres du Conseil d'Administration de Tanger Med Port Authority S.A, par abréviation, « TMPA » se sont réunis en Conseil d'Administration en présentiel {('au ' + lieu) if lieu else ''} sur convocation et sous la présidence de.")
+    doc.add_paragraph()
 
-                            for j, cell_content in enumerate(cells_content):
-                                current_cell = table.rows[i].cells[j]
-                                if current_cell is None:
-                                    print(f"[ERROR] Cellule ({i},{j}) est None dans table dynamique. Cellule ignorée.")
-                                    continue
-                                
-                                format_table_cell(current_cell, cell_content,
-                                               alignment=WD_ALIGN_PARAGRAPH.CENTER if i == 0 else WD_ALIGN_PARAGRAPH.LEFT,
-                                               bold=i == 0)
-                                current_cell.width = Inches(col_width)
-                        except Exception as e:
-                            print(f"[ERROR] Erreur lors du traitement de la ligne {i}: {str(e)}")
-                            continue
-                except Exception as e:
-                    print(f"[ERROR] Erreur lors de la création du tableau: {str(e)}")
-                    continue
+    # === Participants ===
+    # Extraire les participants du texte généré
+    participants_section = ""
+    if "PARTICIPANTS" in pv_text:
+        start_idx = pv_text.find("PARTICIPANTS")
+        end_idx = pv_text.find("ORDRE DU JOUR")
+        if end_idx == -1:
+            end_idx = len(pv_text)
+        participants_section = pv_text[start_idx:end_idx].strip()
 
-                doc.add_paragraph()  # Espace après le tableau
-                continue
+    # Ajouter les participants présents
+    if "Présents" in participants_section:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = p.add_run("SONT PRÉSENTS OU REPRÉSENTÉS :")
+        run.bold = True
+        run.font.size = Pt(12)
+        run.font.name = 'Times New Roman'
         
-        # Gérer le texte normal et les listes à puces
-        lines = section.split('\n')
-        for line in lines:
-            line_text = line.strip()
-            if not line_text:
+        # Extraire les présents
+        start_idx = participants_section.find("Présents")
+        end_idx = participants_section.find("Absents")
+        if end_idx == -1:
+            end_idx = len(participants_section)
+        presents_text = participants_section[start_idx:end_idx].strip()
+        
+        # Ajouter chaque participant
+        for line in presents_text.split('\n'):
+            if line.strip() and not line.startswith("Présents"):
+                para = doc.add_paragraph(line.strip(), style='List Bullet')
+                para.paragraph_format.left_indent = Pt(24)
+
+    # Ajouter les absents
+    if "Absents" in participants_section:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = p.add_run("EST ABSENT EXCUSÉ")
+        run.bold = True
+        run.font.size = Pt(12)
+        run.font.name = 'Times New Roman'
+        
+        # Extraire les absents
+        start_idx = participants_section.find("Absents")
+        end_idx = participants_section.find("Invités")
+        if end_idx == -1:
+            end_idx = len(participants_section)
+        absents_text = participants_section[start_idx:end_idx].strip()
+        
+        # Ajouter chaque absent
+        for line in absents_text.split('\n'):
+            if line.strip() and not line.startswith("Absents"):
+                para = doc.add_paragraph(line.strip(), style='List Bullet')
+                para.paragraph_format.left_indent = Pt(24)
+
+    # Ajouter les invités
+    if "Invités" in participants_section:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = p.add_run("ASSISTENT ÉGALEMENT À LA RÉUNION :")
+        run.bold = True
+        run.font.size = Pt(12)
+        run.font.name = 'Times New Roman'
+        
+        # Extraire les invités
+        start_idx = participants_section.find("Invités")
+        invites_text = participants_section[start_idx:].strip()
+        
+        # Ajouter chaque invité
+        for line in invites_text.split('\n'):
+            if line.strip() and not line.startswith("Invités"):
+                para = doc.add_paragraph(line.strip(), style='List Bullet')
+                para.paragraph_format.left_indent = Pt(24)
+
+    doc.add_paragraph()
+    doc.add_paragraph("Une feuille de présence a été établie et signée conformément à la loi par les membres du Conseil d'Administration participant à la réunion, chacun tant en son nom personnel que comme mandataire dûment habilité selon un pouvoir spécial.")
+    doc.add_paragraph()
+
+    # === Ordre du jour ===
+    doc.add_paragraph("ORDRE DU JOUR :", style='Normal').runs[0].bold = True
+    
+    # Extraire l'ordre du jour du texte généré
+    if "ORDRE DU JOUR" in pv_text:
+        start_idx = pv_text.find("ORDRE DU JOUR")
+        end_idx = pv_text.find("DÉROULÉ DE LA RÉUNION")
+        if end_idx == -1:
+            end_idx = len(pv_text)
+        ordre_du_jour_text = pv_text[start_idx:end_idx].strip()
+        
+        # Ajouter chaque point de l'ordre du jour
+        for line in ordre_du_jour_text.split('\n'):
+            if line.strip() and not line.startswith("ORDRE DU JOUR"):
+                if line.strip().startswith(('1.', '2.', '3.', '4.', '5.')):
+                    para = doc.add_paragraph(line.strip(), style='List Number')
+                    para.paragraph_format.left_indent = Pt(24)
+
+    doc.add_paragraph()
+
+    # === Déroulé de la réunion ===
+    if "DÉROULÉ DE LA RÉUNION" in pv_text:
+        start_idx = pv_text.find("DÉROULÉ DE LA RÉUNION")
+        end_idx = pv_text.find("CONCLUSION")
+        if end_idx == -1:
+            end_idx = len(pv_text)
+        deroule_text = pv_text[start_idx:end_idx].strip()
+        
+        # Traiter chaque point
+        current_point = None
+        for line in deroule_text.split('\n'):
+            line = line.strip()
+            if not line or line.startswith("DÉROULÉ DE LA RÉUNION"):
                 continue
-
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-            p.paragraph_format.space_before = Pt(0)
-            p.paragraph_format.space_after = Pt(6)
-
-            # Détecter et formater les listes à puces
-            if line_text.startswith(('-', '*', '•')):
-                text_content = re.sub(r"^[-*•]\s*", "", line_text)
-                p.text = text_content
-                p.style = 'List Bullet'
+                
+            if line.startswith("Point"):
+                if current_point:
+                    doc.add_paragraph()
+                current_point = doc.add_paragraph()
+                run = current_point.add_run(line.split(":", 1)[1].strip().upper())
+                run.bold = True
+                run.underline = True
+                run.font.color.rgb = RGBColor(0, 32, 96)
+            elif line.startswith(("Décisions", "Discussions", "Résolutions")):
+                para = doc.add_paragraph()
+                run = para.add_run(line.split(":", 1)[0] + " :")
+                run.bold = True
+                content = line.split(":", 1)[1].strip()
+                if content:
+                    para.add_run(" " + content)
             else:
-                p.text = line_text
-                p.paragraph_format.first_line_indent = Inches(0.3)
-    
-    # 1. Tableau des recommandations
-    doc.add_paragraph() # Ajoute un espace avant le titre
-    recommendations_title = doc.add_paragraph()
-    run_reco_title = recommendations_title.add_run("RECOMMANDATIONS")
-    run_reco_title.bold = True
-    run_reco_title.font.name = 'Times New Roman'
-    run_reco_title.font.size = Pt(12)
-    recommendations_title.paragraph_format.space_before = Pt(6) # Espace avant le titre
-    recommendations_title.paragraph_format.space_after = Pt(6) # Espace après le titre
+                if current_point:
+                    doc.add_paragraph(line)
 
-    # Créer la structure du tableau des recommandations (juste l'en-tête initialement)
-    recommendations_table = doc.add_table(rows=1, cols=4)
-    recommendations_table.style = 'Table Grid'
-    recommendations_table.autofit = False
-    
-    # Définir les en-têtes
-    headers = ["Domaine", "Recommandations", "Structure\nresponsable", "Échéance"]
-    header_cells = recommendations_table.rows[0].cells
-    for i, header in enumerate(headers):
-        format_table_cell(header_cells[i], header, alignment=WD_ALIGN_PARAGRAPH.CENTER, bold=True)
-    
-    # Définir les largeurs des colonnes (total: 6 pouces)
-    widths = [1.5, 2.5, 1.0, 1.0]  # en pouces
-    for i, width in enumerate(widths):
-        for cell in recommendations_table.columns[i].cells:
-            cell.width = Inches(width)
-    
-    # --- Extraire et ajouter les recommandations --- 
-    recommendations_data = []
-    # Utiliser directement extracted_reco_text au lieu de chercher à nouveau dans content
-    if extracted_reco_text:
-        # Regex plus tolérante et recherche globale
-        reco_pattern = re.compile(
-            r"\[RECO\]\s*Domaine\s*=\s*\"(.*?)\"\s*\|\s*Recommandation\s*=\s*\"(.*?)\"\s*\|\s*Responsable\s*=\s*\"(.*?)\"\s*\|\s*Échéance\s*=\s*\"(.*?)\"",
-            re.IGNORECASE | re.DOTALL
-        )
-        matches = reco_pattern.findall(extracted_reco_text)
-        for match in matches:
-            recommendations_data.append({
-                "Domaine": match[0].strip(),
-                "Recommandations": match[1].strip(),
-                "Responsable": match[2].strip(),
-                "Échéance": match[3].strip()
-            })
-        # Log les lignes qui commencent par [RECO] mais ne matchent pas
-        for line in extracted_reco_text.strip().split('\n'):
-            if line.strip().startswith('[RECO]') and not reco_pattern.match(line.strip()):
-                print(f"[WARN] Ligne de recommandation non reconnue: {line.strip()}")
-
-    # Remplacer le contenu traité pour ne plus inclure la section reco
-    # content = main_content_for_later # Supprimé, content est déjà propre
-
-    # Ajouter les lignes au tableau
-    if recommendations_data:
-        for reco in recommendations_data:
-            row_cells = recommendations_table.add_row().cells
-            format_table_cell(row_cells[0], reco.get("Domaine", "N/A"))
-            format_table_cell(row_cells[1], reco.get("Recommandations", "N/A"))
-            format_table_cell(row_cells[2], reco.get("Responsable", "N/A"))
-            format_table_cell(row_cells[3], reco.get("Échéance", "N/A"))
-            # Réappliquer les largeurs aux nouvelles cellules
-            for i, width in enumerate(widths):
-                 row_cells[i].width = Inches(width)
-    else:
-        # Ajouter une ligne indiquant "Aucune recommandation"
-        row_cells = recommendations_table.add_row().cells
-        # Écrire le message dans la première cellule, laisser les autres vides
-        format_table_cell(row_cells[0], "Aucune recommandation identifiée", alignment=WD_ALIGN_PARAGRAPH.CENTER)
-        # Optionnel: laisser les autres cellules vides ou mettre "-"
-        format_table_cell(row_cells[1], "")
-        format_table_cell(row_cells[2], "")
-        format_table_cell(row_cells[3], "")
-        # Réappliquer les largeurs aux nouvelles cellules
-        for i, width in enumerate(widths):
-             row_cells[i].width = Inches(width)
-
-    # Fin de la section Recommandations
-    doc.add_paragraph() # Espace après le tableau
-
-    # 2. Annexes et références (Utilise pdf_data)
-    doc.add_paragraph()
-    annexes_title = doc.add_paragraph()
-    annexes_title.add_run("ANNEXES ET RÉFÉRENCES").bold = True
-    
-    pdf_filenames = list(pdf_data.keys())
-    if pdf_filenames:
-        annexes_table = doc.add_table(rows=len(pdf_filenames), cols=2)
-        annexes_table.style = 'Table Grid'
-        annexes_table.autofit = False
+    # === Conclusion ===
+    if "CONCLUSION" in pv_text:
+        start_idx = pv_text.find("CONCLUSION")
+        conclusion_text = pv_text[start_idx:].strip()
         
-        for i, filename in enumerate(pdf_filenames):
-            cells = annexes_table.rows[i].cells
-            format_table_cell(cells[0], f"Document : {i+1}")
-            format_table_cell(cells[1], filename)
-            cells[0].width = Inches(1.5)
-            cells[1].width = Inches(4.5)
-    else:
-        annexes_table = doc.add_table(rows=1, cols=2)
-        annexes_table.style = 'Table Grid'
-        annexes_table.autofit = False
-        cells = annexes_table.rows[0].cells
-        format_table_cell(cells[0], "Aucun document annexe")
-        format_table_cell(cells[1], "")
-    
-    doc.add_paragraph()  # Espace après les annexes
-    
-    # 3. Lexique technique (Utilise pdf_data)
-    doc.add_paragraph()
-    lexique_title = doc.add_paragraph()
-    lexique_title.add_run("LEXIQUE TECHNIQUE").bold = True
-    
-    # Agréger tous les acronymes de tous les PDFs
-    all_acronyms = {}
-    for data in pdf_data.values():
-        if isinstance(data, dict) and 'acronyms' in data:
-             all_acronyms.update(data['acronyms']) # update fusionne les dictionnaires
-    
-    # Créer le tableau du lexique
-    if all_acronyms:
-        # Trier les acronymes par ordre alphabétique
-        sorted_acronyms = sorted(all_acronyms.items())
+        doc.add_paragraph()
+        p = doc.add_paragraph()
+        run = p.add_run("CONCLUSION")
+        run.bold = True
+        run.font.size = Pt(12)
         
-        lexique_table = doc.add_table(rows=len(sorted_acronyms), cols=2)
-        lexique_table.style = 'Table Grid'
-        lexique_table.autofit = False
-        
-        for i, (acronym, definition) in enumerate(sorted_acronyms):
-            cells = lexique_table.rows[i].cells
-            format_table_cell(cells[0], acronym, alignment=WD_ALIGN_PARAGRAPH.CENTER)
-            format_table_cell(cells[1], definition)
-            cells[0].width = Inches(1.5)
-            cells[1].width = Inches(4.5)
-    else:
-        lexique_table = doc.add_table(rows=1, cols=2)
-        lexique_table.style = 'Table Grid'
-        lexique_table.autofit = False
-        cells = lexique_table.rows[0].cells
-        format_table_cell(cells[0], "Aucun acronyme trouvé")
-        format_table_cell(cells[1], "")
+        for line in conclusion_text.split('\n'):
+            if line.strip() and not line.startswith("CONCLUSION"):
+                doc.add_paragraph(line.strip())
 
-    # Sauvegarder dans un buffer
-    doc_buffer = io.BytesIO()
-    doc.save(doc_buffer)
-    doc_buffer.seek(0)
-    
-    return doc_buffer
+    # === Pied de page ===
+    section = doc.sections[0]
+    footer = section.footer
+    footer_para = footer.paragraphs[0]
+    footer_para.text = f"PV_CA_TMPA_{meeting_info.get('date', '').replace('/', '_')}"
+    footer_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-def generate_meeting_minutes(video_transcript, handwritten_text, pdf_summary, meeting_info):
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def generate_meeting_minutes(video_transcript, handwritten_text, pdf_summary, meeting_info, audio_transcript=None):
     """Génère un PV de réunion structuré avec un niveau de détail élevé et des données précises"""
     try:
         # Formater les sources d'information de manière plus structurée
@@ -999,165 +819,54 @@ def generate_meeting_minutes(video_transcript, handwritten_text, pdf_summary, me
             combined_text += "[DOCUMENTS PDF]\n"
             combined_text += pdf_summary.strip() + "\n\n"
 
+        # 4. Ajouter la transcription audio si disponible   
+        if audio_transcript and audio_transcript.strip():
+            combined_text += "[ENREGISTREMENT AUDIO]\n"
+            combined_text += audio_transcript.strip() + "\n\n"  
+
         if not combined_text.strip():
             return "Aucun contenu disponible pour générer le PV."
 
         model = genai.GenerativeModel('gemini-2.0-flash')
         
-        prompt = f"""Génère un procès-verbal détaillé et professionnel en utilisant TOUTES les sources d'information fournies.
-        
-        ⚠️ RÈGLES CRUCIALES :
-        1. ABSOLUMENT PAS D'HALLUCINATIONS :
-           - Ne générer QUE du contenu présent dans les sources fournies
-           - Ne PAS inventer de faits, chiffres ou discussions
-           - Ne PAS extrapoler ou ajouter des informations non présentes
-           - En cas de doute, omettre plutôt qu'inventer
+        prompt = f"""Analyse les sources d'information suivantes et génère un procès-verbal structuré au format suivant :
 
-        2. EXACTITUDE DES NOMS DES PARTICIPANTS :
-           - Utiliser UNIQUEMENT les noms des participants listés au début du PV
-           - Vérifier l'orthographe EXACTE de chaque nom mentionné
-           - Utiliser systématiquement le même format pour les titres (M., Mme)
-           - Ne JAMAIS mentionner de participants non listés initialement
-           - En cas de doute sur l'identité d'un intervenant, utiliser "un participant" plutôt que de risquer une erreur
-           - Liste des participants autorisés et leurs titres :
-           {meeting_info.get('participants_text', '')}
-        
-        3. MISE EN FORME SIMPLE ET EFFICACE :
-           - Pas d'indentations inutiles dans le texte
-           - Aligner tout le texte à gauche sauf indication contraire
-           - Utiliser les retours à la ligne uniquement quand nécessaire
-           - Éviter toute mise en forme décorative sans utilité
-        
-        SOURCES D'INFORMATION À INTÉGRER :
-        1. Transcription de la vidéo de la réunion
-        2. Notes manuscrites prises pendant la réunion
-        3. Documents PDF analysés
-        
-        INSTRUCTIONS SPÉCIFIQUES POUR L'ORDRE DU JOUR :
-        1. Commencer par une section "ORDRE DU JOUR :" seule sur sa ligne
-        2. Lister les points avec ce format EXACT :
-           - Un point par ligne (pas de ligne vide entre les points)
-           - Numérotation : "1. ", "2. ", etc. (avec un espace après le point)
-           - Texte en minuscules (sauf première lettre et noms propres)
-           - Pas de formatage spécial (pas de gras, pas d'italique)
-        3. Après le dernier point, sauter une ligne
-        4. Ajouter la phrase de transition sur un nouveau paragraphe :
-           "L'ordre du jour proposé ayant été adopté à l'unanimité, les membres du Comité présents ont entamé l'examen des points inscrits."
-        
-        Exemple EXACT du format attendu :
-        ORDRE DU JOUR :
-        1. Validation du procès-verbal de la réunion précédente
-        2. Discussion sur les placements immobiliers et les fonds de société
-        3. Point sur l'avancement du projet X
+1. PARTICIPANTS :
+   - Présents : [Liste des participants présents]
+   - Absents excusés : [Liste des absents excusés]
+   - Invités : [Liste des invités]
 
-        L'ordre du jour proposé ayant été adopté à l'unanimité, les membres du Comité présents ont entamé l'examen des points inscrits.
+2. ORDRE DU JOUR :
+   [Liste numérotée des points à l'ordre du jour]
 
-        INSTRUCTIONS POUR LE RESTE DU CONTENU :
-        - Utiliser la transcription vidéo comme source principale pour les discussions et interventions
-        - Intégrer les détails des notes manuscrites pour compléter ou clarifier les points discutés
-        - Incorporer les données et statistiques des documents PDF de manière contextuelle
-        - Assurer la cohérence entre les différentes sources d'information
-        - En cas de divergence entre les sources, privilégier dans l'ordre :
-          1) La transcription vidéo (source primaire des discussions)
-          2) Les notes manuscrites (annotations et précisions en temps réel)
-          3) Les documents PDF (informations de référence)
+3. DÉROULÉ DE LA RÉUNION :
+   Pour chaque point de l'ordre du jour :
+   - Titre du point
+   - Décisions prises
+   - Discussions importantes
+   - Résolutions adoptées
 
-        RÈGLES DE FORMATAGE ET CONTENU :
-        
-        1. FORMAT DE L'ORDRE DU JOUR :
-           - Commencer par "ORDRE DU JOUR :"
-           - Liste immédiate des points numérotés sans espaces entre eux et en minuscule sauf la premiere lettre et pas en gras.
-           - Format exact attendu :
-           ORDRE DU JOUR :
-           1. VALIDATION DU PROCÈS-VERBAL DE LA RÉUNION PRÉCÉDENTE
-           2. EXAMEN DES COMPTES DU PREMIER SEMESTRE 2024
-           3. DISCUSSION SUR LES PLACEMENTS IMMOBILIERS ET LES FONDS DE SOCIÉTÉ
-           4. POINT SUR L'AVANCEMENT DU PROJET X
-        
-           Après les points de l'ordre du jour, ajouter EXACTEMENT cette phrase sur une nouvelle ligne apres un saut de ligne:
-           "L'ordre du jour proposé ayant été adopté à l'unanimité, les membres du Comité présents ont entamé l'examen des points inscrits."
-        
-        2. RÈGLES STRICTES POUR L'ORDRE DU JOUR :
-           - PAS d'introduction ou de texte avant l'ordre du jour
-           - PAS d'espace entre "ORDRE DU JOUR :" et le premier point
-           - PAS d'espace entre les points
-           - Numérotation simple : "1. ", "2. ", etc.
-           - Texte des points en minuscule sauf la premiere lettre
-           - Points alignés sans indentation
-           - APRÈS les points, ajouter la phrase de transition EXACTEMENT comme spécifiée
-        
-        3. PRÉSENTATION DES DONNÉES ET STATISTIQUES :
-           - Intégrer naturellement les statistiques importantes dans les paragraphes
-           - Mettre en évidence les chiffres clés dans le contexte
-           - Inclure les comparaisons et évolutions pertinentes
-           - NE PAS INVENTER de chiffres ou statistiques non présents dans les sources
-        
-        4. STRUCTURE DU CONTENU APRÈS L'ORDRE DU JOUR :
-           - Le corps du PV DOIT être structuré en sections distinctes, correspondant EXACTEMENT à chaque point de l'ordre du jour
-           - Chaque section DOIT commencer par le numéro et le titre exact du point de l'ordre du jour (en majuscules)
-           - Sous chaque titre de section, développer UNIQUEMENT les discussions, décisions et informations présentes dans les sources
-           - NE PAS mélanger les informations de différents points
-           - Assurer une transition logique et claire entre les sections
-           - Tout le texte aligné à gauche sans indentation inutile
-        
-        5. RÈGLES DE RÉDACTION POUR UN PV PRÉCIS :
-           - Style professionnel et formel
-           - Phrases complètes et précises
-           - Se limiter STRICTEMENT aux informations présentes dans les sources
-           - Utiliser des marqueurs de liste simples si nécessaire
-           - Assurer la précision absolue dans la présentation des faits
-           - Éviter toute spéculation ou interprétation personnelle
-           
-        6. IDENTIFICATION ET FORMATAGE DES RECOMMANDATIONS :
-           - Si des recommandations sont mentionnées dans TOUTE source (vidéo, notes, documents), les identifier
-           - LIMITER le nombre total de recommandations à UN MAXIMUM DE 5 (les plus importantes uniquement)
-           - À la fin du texte, ajouter une section '--- RECOMMANDATIONS ---'
-           - Format pour chaque recommandation : 
-             [RECO] Domaine="[domaine]" | Recommandation="[texte]" | Responsable="CMR" | Échéance="[délai]"
-           - Ne PAS créer de recommandations non explicitement mentionnées dans les sources
-           - IMPORTANT pour le champ Responsable :
-             * TOUJOURS utiliser "CMR" comme structure responsable
-             * NE JAMAIS mettre le nom d'un employé ou d'une personne
-             * NE JAMAIS utiliser de sous-divisions ou de services spécifiques
-             * La responsabilité est TOUJOURS attribuée à l'institution CMR dans son ensemble
+4. CONCLUSION :
+   - Résumé des décisions principales
+   - Prochaines étapes
+   - Date de la prochaine réunion si mentionnée
 
-        TRAITEMENT DES ANNEXES ET RÉFÉRENCES :
-        1. IDENTIFICATION DES ANNEXES :
-           - Identifier tous les documents mentionnés dans les sources
-           - Rechercher leur signification et description exacte dans les sources
-           - Inclure le titre complet et la référence précise de chaque document
-           - Pour chaque annexe citée, vérifier :
-             * Son titre officiel complet
-             * Sa référence ou numéro si mentionné
-             * Sa description ou son contenu principal tel que décrit dans les sources
-           - Ne pas inventer de descriptions si non trouvées dans les sources
+Sources d'information :
+{combined_text}
 
-        2. CITATION DES ANNEXES DANS LE TEXTE :
-           - Lors de la première mention d'une annexe, inclure sa référence complète
-           - Utiliser la formulation exacte trouvée dans les sources
-           - Si un document est mentionné sans description claire, utiliser uniquement son titre sans interprétation
-
-        IMPORTANT :
-        - Commencer DIRECTEMENT par "ORDRE DU JOUR :"
-        - Maintenir un format EXACT pour l'ordre du jour
-        - Utiliser UNIQUEMENT des majuscules pour les points de l'ordre du jour
-        - Structurer le PV selon les points de l'ordre du jour
-        - NE JAMAIS inventer ou extrapoler des informations
-        - Éviter toute indentation ou mise en forme inutile"""
+Instructions :
+1. Utilise UNIQUEMENT les informations présentes dans les sources
+2. Respecte la structure demandée
+3. Sois précis et professionnel
+4. Inclus toutes les décisions et discussions importantes
+5. Mentionne les votes et résolutions si présents dans les sources"""
 
         @retry_with_backoff
         def generate_content():
             response = model.generate_content([
                 {
                     "role": "user",
-                    "parts": [f"""Analyse TOUTES les sources d'information suivantes et génère un PV détaillé et professionnel.
-                    Assure-toi d'intégrer les informations de CHAQUE source de manière cohérente.
-
-Sources d'information :
-{combined_text}
-
-Instructions Détaillées :
-{prompt}"""]
+                    "parts": [prompt]
                 }
             ])
             return response.text if response.text else ""
@@ -1326,6 +1035,113 @@ def download_video_from_drive(video_url, output_path):
             pass
         return False
 
+
+def record_audio_simple():
+    st.subheader("🎤 Enregistrement vocal")
+    wav_audio_data = st_audiorec()
+
+    if wav_audio_data:
+        st.success("✅ Enregistrement terminé !")
+        
+        # Utiliser tempfile pour créer un fichier temporaire pour l'audio enregistré
+        try:
+            st.info("Création du fichier temporaire...")
+            # Utilisez NamedTemporaryFile avec delete=False pour que le fichier persiste après la fermeture
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio_file:
+                temp_audio_path = temp_audio_file.name
+                st.info(f"Fichier temporaire créé : {temp_audio_path}")
+                
+                st.info("Écriture des données audio dans le fichier temporaire...")
+                temp_audio_file.write(wav_audio_data)
+                st.info("Écriture terminée.")
+            
+            # Stocker le chemin du fichier temporaire dans la session
+            st.session_state.audio_file_path = temp_audio_path
+            st.session_state.audio_transcript = ""  # Reset transcript
+            st.write(f"📂 Chemin local du fichier temporaire : `{temp_audio_path}`")
+
+            # Afficher les options de lecture et téléchargement à partir du fichier temporaire
+            # Il faut rouvrir le fichier pour le lire car il a été fermé par le 'with' statement
+            st.audio(open(temp_audio_path, "rb").read(), format='audio/wav')
+            st.download_button("💾 Télécharger l'audio", open(temp_audio_path, "rb").read(), file_name="enregistrement.wav")
+
+        except Exception as e:
+            st.error(f"❌ Erreur lors de la création/écriture du fichier audio temporaire : {str(e)}")
+            st.session_state.audio_file_path = None # S'assurer que l'état est propre
+            st.session_state.audio_transcript = ""
+
+def upload_audio_file():
+    st.subheader("🎧 Uploader un fichier audio")
+    uploaded_file = st.file_uploader(
+        "Choisir un fichier audio",
+        type=["mp3", "wav", "ogg", "flac", "aac", "m4a"],
+        help="Formats acceptés : MP3, WAV, OGG, FLAC, AAC, M4A",
+        key="audio_uploader"
+    )
+
+    if uploaded_file is not None:
+        st.success("✅ Fichier audio uploadé !")
+        
+        # Utiliser tempfile pour créer un fichier temporaire pour l'audio uploadé
+        try:
+            st.info("Création du fichier temporaire...")
+            # Utiliser le suffixe basé sur l'extension du fichier uploadé
+            suffix = os.path.splitext(uploaded_file.name)[1]
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_audio_file:
+                temp_audio_path = temp_audio_file.name
+                st.info(f"Fichier temporaire créé : {temp_audio_path}")
+
+                st.info("Écriture des données audio dans le fichier temporaire...")
+                # uploaded_file.getvalue() contient les bytes du fichier uploadé
+                temp_audio_file.write(uploaded_file.getvalue())
+                st.info("Écriture terminée.")
+            
+            # Stocker le chemin du fichier temporaire dans la session
+            st.session_state.audio_file_path = temp_audio_path
+            st.session_state.audio_transcript = ""  # Reset transcript
+            st.write(f"📂 Chemin local du fichier temporaire : `{temp_audio_path}`")
+
+            # Afficher les options de lecture et téléchargement à partir du fichier temporaire
+            st.audio(open(temp_audio_path, "rb").read(), format=uploaded_file.type) # Use uploaded file type
+            st.download_button("💾 Télécharger l'audio", open(temp_audio_path, "rb").read(), file_name=uploaded_file.name)
+
+        except Exception as e:
+            st.error(f"❌ Erreur lors de la création/écriture du fichier audio temporaire : {str(e)}")
+            st.session_state.audio_file_path = None # S'assurer que l'état est propre
+            st.session_state.audio_transcript = ""
+
+def parse_pv_text(pv_text, meeting_info):
+    """
+    Parse le texte du PV généré par Gemini pour extraire :
+    - Les participants (Monsieur/Madame + nom)
+    - Les points d'ordre du jour (titre + contenu)
+    Retourne un dictionnaire structuré pour create_word_pv.
+    """
+    pv_struct = {
+        'presents': [],
+        'absents': [],
+        'assistent': [],
+        'ordre_du_jour': []
+    }
+    # Participants : on prend ceux de meeting_info (plus fiable)
+    for name, title in meeting_info.get('participants', []):
+        civilite = 'Monsieur' if 'M.' in title or 'Monsieur' in title else 'Madame' if 'Mme' in title or 'Madame' in title else 'Monsieur'
+        pv_struct['presents'].append((civilite, name))
+    # TODO : gérer absents et assistent si tu ajoutes ces champs dans l'UI
+
+    # Points d'ordre du jour
+    # On cherche les titres de points (ex: 1. TITRE)
+    point_pattern = re.compile(r'\n?(\d+)\.\s*(.+?)(?=\n\d+\.|\Z)', re.DOTALL)
+    matches = list(point_pattern.finditer(pv_text))
+    for i, match in enumerate(matches):
+        titre = match.group(2).strip().split('\n')[0]
+        # Le contenu est tout ce qui suit le titre jusqu'au prochain point
+        start = match.end()
+        end = matches[i+1].start() if i+1 < len(matches) else len(pv_text)
+        contenu = pv_text[start:end].strip()
+        pv_struct['ordre_du_jour'].append({'titre': titre, 'contenu': contenu})
+    return pv_struct
+
 def main():
     st.set_page_config(
         page_title="Assistant de Réunion CMR",
@@ -1355,6 +1171,8 @@ def main():
         st.session_state.pdf_summary = ""
     if 'pdf_data' not in st.session_state:
         st.session_state.pdf_data = {}
+    if 'audio_transcript' not in st.session_state:
+        st.session_state.audio_transcript = ""
     if 'meeting_info' not in st.session_state:
         st.session_state.meeting_info = None
     if 'additional_participants' not in st.session_state:
@@ -1368,58 +1186,13 @@ def main():
     with col1:
         pv_number = st.text_input("Numéro du PV", "02/24")
         date = st.date_input("Date", format="DD/MM/YYYY")
-        lieu = st.text_input("Lieu", "Salle du Conseil CMR")
+        lieu = st.text_input("Lieu", " ")
         heure_debut = st.time_input("Heure début")
         heure_fin = st.time_input("Heure fin")
     
     with col2:
         st.subheader("Participants")
         participants = []
-        
-        # Sections prédéfinies avec leurs participants
-        sections = {
-            "Membres du Comité d'Audit": [
-                ("M. Aziz LOUBANI", "Président du Comité d'Audit, Représentant du Ministère de l'Économie et des Finances"),
-                ("M. Mustapha KASSI", "Expert et membre indépendant"),
-                ("M. Mohammed EL HAJJOUJI", "Expert et membre indépendant")
-            ],
-            "Caisse Marocaine des Retraites": [
-                ("M. Lotfi BOUJENDAR", "Directeur de la CMR"),
-                ("M. Mohamed El Mokhtar LOUTFI", "Secrétaire Général de la CMR"),
-                ("M. Mohamed Jaber KHEMLICHI", "Chef de Pôle Gestion de Portefeuille"),
-                ("M. Fouad BOUKHNIF", "Chef de la Division Gestion"),
-                ("M. Noureddine EL FALLAKI", "Chef de la Division Financière et Comptable"),
-                ("M. Mohamed ESSALMANI", "Chef de Service Financier"),
-                ("Mme Jalila BADRI", "Chef de Service Comptabilité"),
-                ("M. Mohamed HAMZAOUI", "Chef de la Division Paiement des Prestations"),
-                ("M. Abdelhak JAOUAD", "Chef de Service Centralisation et Suivi"),
-                ("M. Brahim NAHI", "Chef de Service Audit"),
-                ("Mme Hasnae AIT HAMMOU", "Chef de Service Gouvernance"),
-                ("M. Mohamed BESRI", "Cadre au Service Gouvernance")
-            ],
-            "Cabinet d'audit des comptes": [
-                ("M. Khalid FIZAZI", "Managing Partner du Cabinet « FIZAZI »"),
-                ("M. Abdelilah ZIAT", "Senior Partner du Cabinet « FIZAZI »")
-            ]
-        }
-        
-        # Créer un dictionnaire pour stocker l'état des checkboxes
-        if 'participant_checkboxes' not in st.session_state:
-            st.session_state.participant_checkboxes = {}
-        
-        # Afficher les sections et leurs participants
-        for section, default_participants in sections.items():
-            st.write(f"**{section}**")
-            for name, title in default_participants:
-                key = f"{name}_{title}"
-                if key not in st.session_state.participant_checkboxes:
-                    st.session_state.participant_checkboxes[key] = False
-                
-                if st.checkbox(f"{name} - {title}", key=key, value=st.session_state.participant_checkboxes[key]):
-                    st.session_state.participant_checkboxes[key] = True
-                    participants.append((name, title, section))
-                else:
-                    st.session_state.participant_checkboxes[key] = False
         
         # Option pour ajouter des participants supplémentaires
         if st.button("Ajouter un participant"):
@@ -1433,28 +1206,10 @@ def main():
                 name = st.text_input(f"Nom {i+1}")
             with col2:
                 title = st.text_input(f"Titre {i+1}")
-            with col3:
-                section = st.selectbox(f"Section {i+1}", 
-                    ["Membres du Comité d'Audit", 
-                     "Caisse Marocaine des Retraites",
-                     "Cabinet d'audit des comptes"])
             if name and title:
-                participants.append((name, title, section))
+                participants.append((name, title))
 
-    # Organiser les participants par section
-    participants_by_section = {}
-    for name, title, section in participants:
-        if section not in participants_by_section:
-            participants_by_section[section] = []
-        participants_by_section[section].append((name, title))
-
-    # Créer le texte formaté des participants
-    participants_text = []
-    for section in ["Membres du Comité d'Audit", "Caisse Marocaine des Retraites", "Cabinet d'audit des comptes"]:
-        if section in participants_by_section and participants_by_section[section]:
-            participants_text.append(f"\n{section}")
-            for name, title in participants_by_section[section]:
-                participants_text.append(f"- {name}: {title}")
+                
 
     # Stocker les informations de la réunion
     st.session_state.meeting_info = {
@@ -1463,14 +1218,30 @@ def main():
         'lieu': lieu,
         'heure_debut': heure_debut.strftime("%H:%M"),
         'heure_fin': heure_fin.strftime("%H:%M"),
-        'participants': [(name, title) for name, title, _ in participants],
-        'participants_by_section': participants_by_section,
-        'participants_text': "\n".join(participants_text)
+        'participants': [(name, title) for name, title in participants if name and title],
+        'participants_by_section': {
+            "PRÉSENTS OU REPRÉSENTÉS": [f"{name} - {title}" for name, title in participants if name and title],
+            "ABSENTS EXCUSÉS": [],
+            "ASSISTENT ÉGALEMENT": []
+        }
     }
 
     # Section d'upload des fichiers
     st.markdown("### 📁 Importation des documents")
-    
+
+    audio_input_mode = st.radio(
+        "Source audio :",
+        ("Enregistrer l'audio", "Uploader un fichier audio"),
+        horizontal=True,
+        key="audio_input_mode"
+    )
+
+    if audio_input_mode == "Enregistrer l'audio":
+        record_audio_simple()
+    elif audio_input_mode == "Uploader un fichier audio":
+        upload_audio_file()
+
+
     # Style CSS pour contrôler individuellement chaque drag and drop
     st.markdown("""
         <style>
@@ -1521,14 +1292,14 @@ def main():
 
 
     # Créer d'abord les titres dans une rangée
-    title_cols = st.columns(3)
+    title_cols = st.columns(4)
     with title_cols[0]:
         st.markdown("### 🎥 Vidéo de la réunion")
     with title_cols[1]:
         st.markdown("### 📝 Images manuscrites")
     with title_cols[2]:
         st.markdown("### 📄 Documents PDF")
-
+    
     # Ensuite, créer les options radio pour la vidéo dans une rangée séparée
     radio_col, empty_col1, empty_col2 = st.columns(3)
     with radio_col:
@@ -1587,6 +1358,7 @@ def main():
             key="pdf_uploader",
             label_visibility="collapsed"
         )
+    
 
     # Bouton de démarrage centré avec espace au-dessus
     st.markdown("<div style='text-align: center; margin-top: 2em;'>", unsafe_allow_html=True)
@@ -1594,12 +1366,59 @@ def main():
         if not st.session_state.meeting_info:
             st.error("❌ Veuillez remplir les informations de base du PV avant de commencer le traitement.")
             return
-            
         # Créer des conteneurs pour les résultats
         video_container = st.container()
         images_container = st.container()
         pdfs_container = st.container()
+        audio_container = st.container()
         pv_container = st.container()
+
+        # Afficher spinner global
+        global_status = st.info("⏳ Traitement en cours, veuillez patienter...")
+
+        # Traitement de l'audio (transcription batch au moment du traitement)
+        if hasattr(st.session_state, 'audio_file_path') and st.session_state.audio_file_path:
+            audio_file_to_process = st.session_state.audio_file_path
+            try:
+                with audio_container:
+                    st.subheader("🎤 Traitement de l'audio")
+                    # Lire le fichier local pour l'affichage
+                    st.audio(open(audio_file_to_process, "rb").read(), format='audio/wav')
+                    status = st.info("Transcription de l'audio en cours...")
+                    progress_bar = st.progress(0)
+
+                    # Le traitement FFmpeg et segmentation se fera depuis le fichier WAV local
+                    # Pas besoin de TemporaryDirectory ici, on utilise directement le fichier local
+                    segments = segment_audio(audio_file_to_process) # segment_audio prend le chemin en paramètre
+
+                    transcript = []
+                    total = len(segments)
+                    for i, segment_path in enumerate(segments):
+                        # process_segment_batch prend des chemins de segments temporaires créés par segment_audio
+                        # Note: segment_audio crée déjà des fichiers temporaires, process_segment_batch les lit et les supprime.
+                        # La logique ici reste similaire, on passe les chemins des segments.
+                        batch_result = process_segment_batch([segment_path], 0, 1, 1, progress_bar, status)
+                        transcript.extend(batch_result)
+                        # progress_bar et status sont mis à jour dans process_segment_batch maintenant
+
+                    st.session_state.audio_transcript = "\n".join(transcript)
+                    status.success("✅ Transcription audio terminée!")
+                    st.text_area("Transcription de l'audio:", st.session_state.audio_transcript, height=200)
+
+            except Exception as e:
+                st.error(f"❌ Erreur lors du traitement de l'audio : {str(e)}")
+                # S'assurer que l'état de la transcription est vide en cas d'erreur
+                st.session_state.audio_transcript = ""
+            finally:
+                # Nettoyer le fichier WAV local après traitement (réussi ou non)
+                if os.path.exists(audio_file_to_process):
+                    try:
+                        os.remove(audio_file_to_process)
+                        st.info(f"Fichier audio local supprimé : {audio_file_to_process}")
+                    except Exception as e:
+                        st.warning(f"⚠️ Impossible de supprimer le fichier audio local {audio_file_to_process}: {str(e)}")
+                # Réinitialiser le chemin dans la session
+                st.session_state.audio_file_path = None
 
         # Traitement de la vidéo
         with video_container:
@@ -1706,30 +1525,28 @@ def main():
                 else:
                     st.warning("Aucun PDF n'a pu être traité.")
 
-        # Génération du PV
+        # Génération du PV (uniquement après la fin de la transcription)
         with pv_container:
             st.subheader("Génération du PV")
-            # Préparer le résumé combiné pour generate_meeting_minutes
             pdf_summary_for_generation = "\n\n".join(
                 [f"[Document: {name}]\n{data.get('summary', '')}" 
                  for name, data in st.session_state.get('pdf_data', {}).items()]
             )
-            
-            if any([st.session_state.video_transcript, st.session_state.handwritten_text, pdf_summary_for_generation]):
+            if any([st.session_state.video_transcript, st.session_state.handwritten_text, pdf_summary_for_generation, st.session_state.get("audio_transcript", "")]):
                 with st.spinner("Génération du PV en cours..."):
                     pv = generate_meeting_minutes(
                         st.session_state.video_transcript,
                         st.session_state.handwritten_text,
-                        pdf_summary_for_generation, # Utilise le résumé agrégé
-                        st.session_state.meeting_info
+                        pdf_summary_for_generation,
+                        st.session_state.meeting_info,
+                        st.session_state.get("audio_transcript", "")
                     )
                     if pv:
                         st.success("✅ PV généré avec succès!")
                         st.text_area("Procès-verbal de la réunion:", pv, height=500)
-                        
-                        # Création et téléchargement du document Word
                         try:
-                            doc_buffer = create_word_pv(pv, "logo.png")
+                            # Créer le document Word directement à partir du texte généré
+                            doc_buffer = create_word_pv(pv, st.session_state.meeting_info)
                             st.download_button(
                                 label="📎 Télécharger le PV en format Word",
                                 data=doc_buffer,
@@ -1738,8 +1555,9 @@ def main():
                             )
                         except Exception as e_word:
                             st.error(f"❌ Erreur lors de la création du document Word: {str(e_word)}")
+                global_status.success("✅ Traitement terminé !")
             else:
-                st.warning("⚠️ Aucun contenu à traiter pour générer le PV")
+                global_status.warning("⚠️ Aucun contenu à traiter pour générer le PV")
 
 if __name__ == "__main__":
     main() 
