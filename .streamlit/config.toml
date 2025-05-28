@@ -1,10 +1,15 @@
 [server]
 maxUploadSize = 2048
+enableCORS = false
+enableXsrfProtection = false
 
 [theme]
-primaryColor = "#FF4B4B"
+primaryColor = "#1E88E5"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F2F6"
 textColor = "#262730"
-font = "sans serif" 
+font = "sans serif"
 GOOGLE_API_KEY ="AIzaSyBrz5Y_pG3HdRnXtph1DAkw_HzO4FxF95A"
+
+[browser]
+gatherUsageStats = false
