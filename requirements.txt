@@ -11,4 +11,4 @@ requests==2.31.0
 google-auth==2.27.0
 google-api-python-client==2.118.0
 PyAudio==0.2.14
-
+pyaudioop==0.2.14
